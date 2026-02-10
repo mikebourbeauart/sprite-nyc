@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sprite-nyc"
+version = "0.1.0"
+description = "Generate a giant isometric pixel-art map of NYC from Google Maps 3D tiles"
+requires-python = ">=3.11"
+dependencies = [
+    "Pillow",
+    "numpy",
+    "requests",
+    "playwright",
+    "google-cloud-storage",
+    "click",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sprite_nyc"]

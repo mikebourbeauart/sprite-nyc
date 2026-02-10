@@ -1,0 +1,11 @@
+{
+  "center": {
+    "lat": 40.7128,
+    "lng": -74.0060
+  },
+  "azimuth": -15,
+  "elevation": -45,
+  "view_height_meters": 500,
+  "width": 1024,
+  "height": 1024
+}
