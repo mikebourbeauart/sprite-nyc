@@ -30,7 +30,7 @@ Serve `viewer/` with any static file server.
 
 ### Generation Pipeline Flow
 1. **Plan** (`plan_tiles.py`) — Convert lat/lng center + grid dimensions into a tile manifest with 50% overlapping positions
-2. **Render** (`export_views.py`) — Playwright captures 3D tile views (textured + whitebox) from the web renderer
+2. **Render** (`export_views.py`) — Playwright captures 3D tile views from the web renderer
 3. **Template** (`create_template.py`) — Compose infill template showing neighbor context + render with red border marking the region to generate
 4. **Upload** (`gcs_upload.py`) — Upload template to GCS bucket (Oxen API requires public URLs)
 5. **Generate** (`generate_tile_oxen.py`) — Call Oxen.ai fine-tuned model to produce pixel art
@@ -41,7 +41,7 @@ Serve `viewer/` with any static file server.
 - **`src/sprite_nyc/`** — Core pipeline: template creation, rendering, GCS upload, single-tile generation, tile planning/validation
 - **`src/sprite_nyc/e2e_generation/`** — SQLite-backed state machine for large-scale generation. Includes auto-generation with spiral expansion, strip planning, web-based generation manager (port 8080), and DZI export
 - **`src/sprite_nyc/synthetic_data/`** — Training data generators for fine-tuning (infill, inpainting, omni datasets with controlled variant distributions)
-- **`web/`** — Three.js orthographic renderer with Google 3D Tiles, isometric camera, whitebox mode
+- **`web/`** — Three.js orthographic renderer with Google 3D Tiles, isometric camera
 - **`viewer/`** — OpenSeaDragon-based gigapixel viewer for browsing exported maps
 
 ### Critical Conventions

@@ -25,16 +25,14 @@ from sprite_nyc.gcs_upload import upload_file, upload_pil_image
 
 
 OXEN_API_URL = "https://hub.oxen.ai/api/images/edit"
-OXEN_MODEL = "cannoneyed-modern-salmon-unicorn"
+OXEN_MODEL = "mike804-nice-aqua-muskox"
 NUM_INFERENCE_STEPS = 28
-PROMPT = (
-    "Fill in the outlined section with the missing pixels "
-    "corresponding to the <sprite nyc pixel art> style. "
-    "The red border indicates the region to be filled."
-)
+PROMPT = "Convert to <isometric nyc pixel art>"
 
 
-def generate_from_url(image_url: str, api_key: str, prompt: str = PROMPT) -> Image.Image:
+def generate_from_url(
+    image_url: str, api_key: str, prompt: str = PROMPT
+) -> Image.Image:
     """Call Oxen API with an image URL and return the result."""
     headers = {"Authorization": f"Bearer {api_key}"}
     payload = {
@@ -44,11 +42,14 @@ def generate_from_url(image_url: str, api_key: str, prompt: str = PROMPT) -> Ima
         "num_inference_steps": NUM_INFERENCE_STEPS,
     }
 
-    resp = requests.post(OXEN_API_URL, json=payload, headers=headers, timeout=120)
+    resp = requests.post(OXEN_API_URL, json=payload, headers=headers, timeout=300)
     resp.raise_for_status()
     result = resp.json()
 
+    # Response may have url at top level or nested under images[0].url
     result_url = result.get("url") or result.get("image_url")
+    if not result_url and result.get("images"):
+        result_url = result["images"][0].get("url")
     if not result_url:
         raise ValueError(f"No result URL in API response: {result}")
 

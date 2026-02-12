@@ -2,7 +2,7 @@
 Create infill templates for tile generation.
 
 An infill template composites:
-  - The current tile's 3D render (whitebox or render)
+  - The current tile's 3D render
   - Neighboring tiles' already-generated pixel art (if available)
   - A red border around the region to be generated
 

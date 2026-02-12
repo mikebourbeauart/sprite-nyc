@@ -8,7 +8,7 @@ Reference: https://cannoneyed.com/projects/isometric-nyc
 
 ### 3D Rendering Pipeline
 - Built a Three.js web renderer (`web/`) with orthographic isometric camera using Google Maps 3D Tiles API
-- Playwright automation (`export_views.py`) captures both textured renders and whitebox (geometry-only) views
+- Playwright automation (`export_views.py`) captures textured renders
 - Camera config driven by `view.json` (azimuth -15°, elevation -45°)
 
 ### Code Written (Not Yet Tested / Used)
@@ -130,7 +130,7 @@ Steps:
 | Component | Status | Notes |
 |-----------|--------|-------|
 | 3D Web Renderer | Done | Three.js + Google 3D Tiles on port 3000 |
-| Playwright Export | Done | Textured + whitebox capture |
+| Playwright Export | Done | Textured render capture |
 | Fine-Tuned Model | Not Started | Need training data + fine-tune on Oxen.ai |
 | Training Data Gen | Code Written | 3 dataset generators, not yet used |
 | Infill Templates | Code Written | Guided + unguided, red border convention |

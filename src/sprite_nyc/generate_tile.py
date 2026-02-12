@@ -30,13 +30,9 @@ from sprite_nyc.gcs_upload import upload_pil_image
 
 
 OXEN_API_URL = "https://hub.oxen.ai/api/images/edit"
-OXEN_MODEL = "cannoneyed-modern-salmon-unicorn"
+OXEN_MODEL = "mike804-nice-aqua-muskox"
 NUM_INFERENCE_STEPS = 28
-PROMPT = (
-    "Fill in the outlined section with the missing pixels "
-    "corresponding to the <sprite nyc pixel art> style. "
-    "The red border indicates the region to be filled."
-)
+PROMPT = "Convert to <isometric nyc pixel art>"
 
 
 def load_tile_image(tile_dir: Path, name: str) -> Image.Image | None:
@@ -81,9 +77,7 @@ def build_template(tile_dir: Path, tiles_root: Path | None) -> Image.Image:
     """Build the infill template for a tile."""
     render = load_tile_image(tile_dir, "render.png")
     if render is None:
-        render = load_tile_image(tile_dir, "whitebox.png")
-    if render is None:
-        raise FileNotFoundError(f"No render.png or whitebox.png in {tile_dir}")
+        raise FileNotFoundError(f"No render.png in {tile_dir}")
 
     if tiles_root is None:
         return create_unguided_template(render)
@@ -116,11 +110,13 @@ def call_oxen_api(image_url: str, api_key: str) -> Image.Image:
         "num_inference_steps": NUM_INFERENCE_STEPS,
     }
 
-    resp = requests.post(OXEN_API_URL, json=payload, headers=headers, timeout=120)
+    resp = requests.post(OXEN_API_URL, json=payload, headers=headers, timeout=300)
     resp.raise_for_status()
 
     result = resp.json()
     result_url = result.get("url") or result.get("image_url")
+    if not result_url and result.get("images"):
+        result_url = result["images"][0].get("url")
     if not result_url:
         raise ValueError(f"No result URL in response: {result}")
 

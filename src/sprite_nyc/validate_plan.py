@@ -1,8 +1,8 @@
 """
 Validate a tile plan by stitching all rendered tiles into a single image.
 
-Reads the manifest.json produced by plan_tiles.py, finds render.png and
-whitebox.png in each tile folder, and composites them using the 50% overlap.
+Reads the manifest.json produced by plan_tiles.py, finds render.png in each
+tile folder, and composites them using the 50% overlap.
 
 Usage:
     python -m sprite_nyc.validate_plan --tiles-dir tiles/ --output-dir validation/
@@ -94,7 +94,7 @@ def main(tiles_dir: str, output_dir: str) -> None:
     od = Path(output_dir)
     od.mkdir(parents=True, exist_ok=True)
 
-    for name, out_name in [("render.png", "full_render.png"), ("whitebox.png", "full_whitebox.png")]:
+    for name, out_name in [("render.png", "full_render.png"), ("generation.png", "full_generation.png")]:
         print(f"Stitching {name}…")
         result = stitch_tiles(td, name)
         if result:
@@ -102,7 +102,7 @@ def main(tiles_dir: str, output_dir: str) -> None:
             result.save(out_path)
             print(f"  Saved {out_path} ({result.size[0]}×{result.size[1]})")
         else:
-            print(f"  Skipped {name}")
+            print(f"  Skipped — no {name} tiles found")
 
 
 if __name__ == "__main__":

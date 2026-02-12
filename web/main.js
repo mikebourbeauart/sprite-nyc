@@ -145,25 +145,6 @@ function setupTiles(apiKey) {
   scene.add(dir);
 }
 
-// ── Whitebox mode ────────────────────────────────────────────────────
-
-const whiteboxMaterial = new THREE.MeshBasicMaterial({ color: 0xcccccc });
-let whiteboxMode = false;
-
-function setWhitebox(enabled) {
-  whiteboxMode = enabled;
-  tiles.group.traverse((obj) => {
-    if (obj.isMesh) {
-      if (enabled) {
-        if (!obj._origMaterial) obj._origMaterial = obj.material;
-        obj.material = whiteboxMaterial;
-      } else if (obj._origMaterial) {
-        obj.material = obj._origMaterial;
-      }
-    }
-  });
-}
-
 // ── Render loop ──────────────────────────────────────────────────────
 
 let frameCount = 0;
@@ -171,10 +152,7 @@ let frameCount = 0;
 function animate() {
   requestAnimationFrame(animate);
 
-  // Skip tile updates in whitebox mode to prevent material restoration
-  if (!whiteboxMode) {
-    tiles.update();
-  }
+  tiles.update();
 
   renderer.render(scene, camera);
   frameCount++;
@@ -223,19 +201,6 @@ window.waitForTilesReady = (stableFrames = 30) => {
 window.exportPNG = () => {
   renderer.render(scene, camera);
   return canvas.toDataURL("image/png");
-};
-
-window.exportWhiteboxPNG = (waitMs = 5000) => {
-  return new Promise((resolve) => {
-    setWhitebox(true);
-    // Wait for the material to be applied across all tiles over several seconds
-    setTimeout(() => {
-      renderer.render(scene, camera);
-      const data = canvas.toDataURL("image/png");
-      setWhitebox(false);
-      resolve(data);
-    }, waitMs);
-  });
 };
 
 window.getViewConfig = () => viewConfig;

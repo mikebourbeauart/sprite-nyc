@@ -8,7 +8,13 @@
       "Bash(node -e:*)",
       "Bash(uv venv:*)",
       "Bash(uv pip install:*)",
-      "Bash(powershell -Command:*)"
+      "Bash(powershell -Command:*)",
+      "Bash(uv run python:*)",
+      "Bash(ls:*)",
+      "Bash(uv pip uninstall:*)",
+      "Bash(uv run ruff check:*)",
+      "WebFetch(domain:docs.oxen.ai)",
+      "WebSearch"
     ]
   }
 }

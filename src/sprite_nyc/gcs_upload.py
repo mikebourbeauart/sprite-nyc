@@ -25,7 +25,7 @@ DEFAULT_PREFIX = "infill-images/"
 
 def get_client() -> storage.Client:
     """Create a GCS client from environment credentials."""
-    return storage.Client()
+    return storage.Client(project="isometric-nyc-486920")
 
 
 def upload_pil_image(

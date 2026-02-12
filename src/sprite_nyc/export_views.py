@@ -3,7 +3,6 @@ Export isometric views by launching the web renderer and capturing screenshots.
 
 Usage:
     python -m sprite_nyc.export_views --config view.json --output-dir output/
-    python -m sprite_nyc.export_views --config view.json --output-dir output/ --whitebox
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ async def _capture(
     output_dir: str,
     api_key: str,
     port: int,
-    capture_whitebox: bool,
     headed: bool,
 ) -> None:
     output = Path(output_dir)
@@ -100,14 +98,6 @@ async def _capture(
         _save_data_url(render_data, output / "render.png")
         print(f"Saved {output / 'render.png'}")
 
-        # Capture whitebox
-        if capture_whitebox:
-            print("Preparing whitebox capture…")
-            await page.wait_for_timeout(3000)
-            wb_data = await page.evaluate("() => window.exportWhiteboxPNG()")
-            _save_data_url(wb_data, output / "whitebox.png")
-            print(f"Saved {output / 'whitebox.png'}")
-
         await page.wait_for_timeout(1000)
         await browser.close()
 
@@ -123,11 +113,10 @@ def _save_data_url(data_url: str, path: Path) -> None:
 @click.option("--output-dir", default="output", help="Output directory")
 @click.option("--api-key", envvar="GOOGLE_MAPS_API_KEY", required=True, help="Google Maps API key")
 @click.option("--port", default=DEFAULT_PORT, help="Dev server port")
-@click.option("--whitebox/--no-whitebox", default=True, help="Also capture whitebox render")
 @click.option("--headed", is_flag=True, help="Run browser in headed mode for debugging")
-def main(config: str, output_dir: str, api_key: str, port: int, whitebox: bool, headed: bool) -> None:
+def main(config: str, output_dir: str, api_key: str, port: int, headed: bool) -> None:
     """Capture isometric view screenshots via the web renderer."""
-    asyncio.run(_capture(config, output_dir, api_key, port, whitebox, headed))
+    asyncio.run(_capture(config, output_dir, api_key, port, headed))
 
 
 if __name__ == "__main__":
