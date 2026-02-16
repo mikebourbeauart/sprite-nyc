@@ -25,10 +25,14 @@ BORDER_WIDTH = 1
 def create_guided_template(
     render: Image.Image,
     neighbors: dict[str, Image.Image | None],
-    target_quadrant: str = "full",
 ) -> Image.Image:
     """
-    Create a guided infill template.
+    Create a guided infill template matching the omni training convention.
+
+    Neighbor pixel art is composited into the overlap regions (no border).
+    Red borders (1px) are drawn only around quadrants that still show the
+    render — exactly matching the quadrant/half variants the model was
+    trained on.
 
     Parameters
     ----------
@@ -38,9 +42,6 @@ def create_guided_template(
         Mapping of position → generated Image for neighboring tiles.
         Keys: "top", "bottom", "left", "right", "top_left", "top_right",
               "bottom_left", "bottom_right". Values may be None.
-    target_quadrant : str
-        Which region to fill: "full", "tl", "tr", "bl", "br",
-        "top_half", "bottom_half", "left_half", "right_half".
 
     Returns
     -------
@@ -54,24 +55,39 @@ def create_guided_template(
     template = render.copy().convert("RGBA")
 
     # Overlay neighboring generated tiles where they overlap (50% overlap)
-    # The overlap region depends on which neighbor and the tile step
     _composite_neighbors(template, neighbors, w, h)
 
-    # Draw the red border around the target region
+    # Determine which quadrants are still render (not covered by any
+    # neighbor pixel art).  A quadrant is covered if any neighbor that
+    # overlaps it is present.
+    tl_covered = any(neighbors.get(k) is not None for k in ("left", "top", "top_left"))
+    tr_covered = any(neighbors.get(k) is not None for k in ("right", "top", "top_right"))
+    bl_covered = any(neighbors.get(k) is not None for k in ("left", "bottom", "bottom_left"))
+    br_covered = any(neighbors.get(k) is not None for k in ("right", "bottom", "bottom_right"))
+
+    # Draw red borders only around render (uncovered) quadrants
     draw = ImageDraw.Draw(template)
-    box = _get_target_box(target_quadrant, w, h)
-    for i in range(BORDER_WIDTH):
-        draw.rectangle(
-            [box[0] + i, box[1] + i, box[2] - 1 - i, box[3] - 1 - i],
-            outline=BORDER_COLOR,
-        )
+    quadrant_boxes = [
+        (not tl_covered, (0, 0, hw, hh)),
+        (not tr_covered, (hw, 0, w, hh)),
+        (not bl_covered, (0, hh, hw, h)),
+        (not br_covered, (hw, hh, w, h)),
+    ]
+    for needs_border, box in quadrant_boxes:
+        if needs_border:
+            for i in range(BORDER_WIDTH):
+                draw.rectangle(
+                    [box[0] + i, box[1] + i, box[2] - 1 - i, box[3] - 1 - i],
+                    outline=BORDER_COLOR,
+                )
 
     return template
 
 
 def create_unguided_template(render: Image.Image) -> Image.Image:
     """
-    Create an unguided template — just the render with a border.
+    Create an unguided template — render with red border around full image.
+    Matches the 'full' variant in the omni training dataset.
     """
     w, h = render.size
     template = render.copy().convert("RGBA")

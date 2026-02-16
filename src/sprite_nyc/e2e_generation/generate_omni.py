@@ -31,7 +31,7 @@ from sprite_nyc.gcs_upload import upload_pil_image
 
 
 OXEN_API_URL = "https://hub.oxen.ai/api/images/edit"
-OXEN_MODEL = "cannoneyed-modern-salmon-unicorn"
+OXEN_MODEL = "mike804-arrogant-brown-hoverfly"
 NUM_INFERENCE_STEPS = 28
 PROMPT = (
     "Fill in the outlined section with the missing pixels "
@@ -74,6 +74,10 @@ def call_oxen_api(
     result = resp.json()
 
     result_url = result.get("url") or result.get("image_url")
+    if not result_url and "images" in result:
+        images = result["images"]
+        if images and isinstance(images, list) and images[0].get("url"):
+            result_url = images[0]["url"]
     if not result_url:
         raise ValueError(f"No result URL in API response: {result}")
 
@@ -197,12 +201,18 @@ def run_generation_for_quadrants(
     if errors:
         raise ValueError(f"Invalid generation config: {'; '.join(errors)}")
 
-    # Load renders
+    # Load renders for selected tiles + their neighbors
     render_lookup: dict[tuple[int, int], Image.Image] = {}
+    keys_to_load = set()
     for q in selected:
-        render = render_quadrant(generation_dir, q.x, q.y)
+        keys_to_load.add(q.key)
+        for nb_key in q.neighbor_keys().values():
+            keys_to_load.add(nb_key)
+    for key in keys_to_load:
+        x, y = key
+        render = render_quadrant(generation_dir, x, y)
         if render:
-            render_lookup[q.key] = render
+            render_lookup[key] = render
 
     # Create template
     template = create_template_image(selected, grid, render_lookup, tile_size)
@@ -227,6 +237,14 @@ def run_generation_for_quadrants(
     result_image = download_image_to_pil(result_url)
     elapsed = time.time() - start
     print(f"Generation took {elapsed:.1f}s")
+
+    # The model always works at 1024×1024. The API returns 1024×1024 which
+    # represents the full template (with infilled center) at model resolution.
+    # Upscale to template dimensions and extract the selected tile regions.
+    template_size = template.size
+    if result_image.size != template_size:
+        print(f"Resizing result {result_image.size} -> {template_size}")
+        result_image = result_image.resize(template_size, Image.LANCZOS)
 
     # Extract quadrants
     results = extract_generated_quadrants(result_image, selected, grid, tile_size)

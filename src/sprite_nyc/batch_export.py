@@ -89,6 +89,11 @@ async def _batch_capture(
         for name, tile_cfg in tiles:
             tile_dir = output / name
             tile_dir.mkdir(parents=True, exist_ok=True)
+            # Remove stale artifacts from previous runs
+            for stale in ("generation.png", "template.png"):
+                stale_path = tile_dir / stale
+                if stale_path.exists():
+                    stale_path.unlink()
             cfg_path = tile_dir / "view.json"
             with open(cfg_path, "w") as f:
                 json.dump(tile_cfg, f, indent=2)

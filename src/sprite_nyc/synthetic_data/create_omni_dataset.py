@@ -247,6 +247,16 @@ def main(dataset_dir: str, output_dir: str, total_examples: int, seed: int) -> N
         render = Image.open(render_files[name]).convert("RGBA")
         generation = Image.open(gen_files[name]).convert("RGBA")
 
+        # Ensure render and generation are the same size — renders may be
+        # at a different resolution than generations.  Downscale to the
+        # smaller size so training images match the model's native 1024×1024.
+        if render.size != generation.size:
+            target_size = min(render.size, generation.size)
+            if render.size != target_size:
+                render = render.resize(target_size, Image.LANCZOS)
+            if generation.size != target_size:
+                generation = generation.resize(target_size, Image.LANCZOS)
+
         examples = generate_examples_for_pair(
             render, generation, target_per_cat, seed=seed + pair_idx
         )

@@ -25,9 +25,13 @@ from sprite_nyc.gcs_upload import upload_file, upload_pil_image
 
 
 OXEN_API_URL = "https://hub.oxen.ai/api/images/edit"
-OXEN_MODEL = "mike804-nice-aqua-muskox"
+OXEN_MODEL = "mike804-arrogant-brown-hoverfly"
 NUM_INFERENCE_STEPS = 28
-PROMPT = "Convert to <isometric nyc pixel art>"
+PROMPT = (
+    "Fill in the outlined section with the missing pixels "
+    "corresponding to the <sprite nyc pixel art> style. "
+    "The red border indicates the region to generate."
+)
 
 
 def generate_from_url(

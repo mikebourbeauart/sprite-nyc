@@ -6,50 +6,61 @@ Reference: https://cannoneyed.com/projects/isometric-nyc
 
 ## What's Been Done
 
-### 3D Rendering Pipeline
-- Built a Three.js web renderer (`web/`) with orthographic isometric camera using Google Maps 3D Tiles API
-- Playwright automation (`export_views.py`) captures textured renders
+### 3D Rendering Pipeline (Working)
+- Three.js web renderer (`web/`) with orthographic isometric camera using Google Maps 3D Tiles API
+- Playwright automation (`export_views.py`, `batch_export.py`) captures textured renders
 - Camera config driven by `view.json` (azimuth -15°, elevation -45°)
 
-### Code Written (Not Yet Tested / Used)
-The following code exists in the repo but has not been put into production yet:
+### Tile Planning & Batch Rendering (Working)
+- **Tile planning** (`plan_tiles.py`) — camera-aligned stepping (accounts for azimuth rotation), 50% overlap, manifest generation
+- **Batch export** (`batch_export.py`) — grid and landmarks modes, single Playwright session, auto-cleans stale artifacts
+- **Plan validation** (`validate_plan.py`) — stitches tiles into full composite for visual inspection
+- Tested with 3×3 grid centered on lower Manhattan
 
-- **Infill templates** (`create_template.py`) — red border convention, guided/unguided modes, 50% overlap system
-- **Generation API client** (`generate_tile_oxen.py`) — Oxen.ai API wrapper, 28 inference steps, currently pointed at `cannoneyed-modern-salmon-unicorn` model
-- **Tile planning** (`plan_tiles.py`) — geospatial grid math, 50% overlap positions, manifest generation
-- **Plan validation** (`validate_plan.py`) — alpha-blend composite to verify tile alignment
+### Batch Generation Pipeline (Written, Needs Retrained Model)
+- **Batch generate** (`batch_generate.py`) — builds composite templates with full-grid context, cardinal-first spiral order, extracts target tile from model result
+- **Composite templates** — target tile's red border is ~1/4 of the 2048×2048 composite, surrounded by pixel art from already-generated neighbors
 - **GCS upload** (`gcs_upload.py`) — content-addressed uploads to `sprite-nyc-assets` bucket
+- **Generation API client** (`generate_tile_oxen.py`) — Oxen.ai API wrapper, 28 inference steps
+
+### Training Data (Ready for Retraining)
+- 40 render/generation pairs at `output/training_renders/` (renders 1024×1024, generations 2048×2048)
+- **Omni dataset** (`synthetic_data/omni_v02/`) — 240 examples at 1024×1024, 6 variant types (full, quadrant, half, middle, rect_strip, rect_infill)
+- Fixed render/generation size mismatch bug — `create_omni_dataset.py` now downscales to the smaller dimension to avoid zoom artifacts in red-bordered regions
+
+### Code Written (Not Yet Tested)
 - **E2E generation system** (`e2e_generation/`) — SQLite state machine, quadrant seeding, core generation library, batch/single CLIs, strip planning, spiral expansion
 - **Micro-tools** — web generation manager (port 8080), bounds visualizer (port 8081), color replacement, quadrant export/import
-- **Training data generators** (`synthetic_data/`) — infill, inpainting, and omni dataset creators
 - **Viewing** — DZI tile pyramid export, OpenSeaDragon gigapixel viewer
 
 ---
 
 ## What's Left To Do
 
-### Phase 1 — Fine-Tune the Model
-
-Need to fine-tune Qwen/Image-Edit on Oxen.ai to learn the pixel-art style. Per the writeup: ~40 input/output pairs, ~$12, ~4 hours.
+### Phase 1 — Fine-Tune the Model ✓
 
 Steps:
-- Generate initial training pairs manually (render tiles with Playwright, create pixel-art versions)
-- Create training dataset using `synthetic_data/create_omni_dataset.py` (controlled distribution of full/quadrant/half/middle/strip/rect variants)
-- Fine-tune Qwen/Image-Edit on Oxen.ai
+- ~~Generate initial training pairs (40 render/generation pairs)~~ ✓
+- ~~Create training dataset with `create_omni_dataset.py`~~ ✓ (240 examples at 1024×1024)
+- ~~Fix render/generation size mismatch in training data~~ ✓
+- ~~Fine-tune Qwen/Image-Edit on Oxen.ai with `omni_v02` dataset~~ ✓
 - Update model name in `generate_tile_oxen.py` to point at the new model
 - Test single-tile generation end-to-end
 
-### Phase 2 — Validate & Test the Generation Pipeline
+### Phase 2 — Validate & Test the Batch Generation Pipeline ← CURRENT
 
-All the generation code exists but hasn't been run. Need to verify it works end-to-end.
+`batch_generate.py` is rewritten with composite templates but needs testing with the retrained model.
 
 Steps:
-- Test tile planning (`plan_tiles.py`) — generate a small manifest and validate with `validate_plan.py`
-- Test GCS upload — confirm public URLs work with Oxen API
-- Test infill template creation — verify red border convention and neighbor context
-- Test single-tile generation through `generate_tile_oxen.py` with the fine-tuned model
-- Test E2E flow: seed DB (`seed_tiles.py`) → generate quadrants (`generate_tile_omni.py`) → verify results in DB
-- Test the web generation manager (`view_generations.py`) — interactive selection and generation triggering
+- ~~Test tile planning (`plan_tiles.py`) — camera-aligned stepping~~ ✓
+- ~~Test batch rendering (`batch_export.py`) — 3×3 grid~~ ✓
+- ~~Test GCS upload — confirm public URLs work with Oxen API~~ ✓
+- **Run `batch_generate.py` on test_grid with retrained model**
+- Verify composite templates produce correct red border ratio (~1/4 of image)
+- Verify spiral order generates good neighbor context cascade
+- Validate results with `validate_plan.py` composite stitching
+- Test E2E flow if needed: seed DB (`seed_tiles.py`) → generate quadrants → verify results
+- Fix `seed_tiles.py` azimuth stepping bug (same issue that was fixed in `plan_tiles.py`)
 
 ### Phase 3 — Small-Scale Generation Run
 
@@ -129,15 +140,17 @@ Steps:
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| 3D Web Renderer | Done | Three.js + Google 3D Tiles on port 3000 |
-| Playwright Export | Done | Textured render capture |
-| Fine-Tuned Model | Not Started | Need training data + fine-tune on Oxen.ai |
-| Training Data Gen | Code Written | 3 dataset generators, not yet used |
-| Infill Templates | Code Written | Guided + unguided, red border convention |
-| GCS Upload | Code Written | Content-addressed, public URLs |
-| Tile Planning | Code Written | Geospatial grid math, manifest generation |
+| 3D Web Renderer | **Done** | Three.js + Google 3D Tiles on port 3000 |
+| Playwright Export | **Done** | `batch_export.py` — grid + landmarks modes |
+| Tile Planning | **Done** | Camera-aligned stepping, 50% overlap, manifest |
+| Plan Validation | **Done** | Stitched composites for visual inspection |
+| Training Data | **Done** | 240 examples at 1024×1024 in `omni_v02/` |
+| Fine-Tuned Model | **In Progress** | Needs retraining on fixed omni_v02 dataset |
+| Batch Generation | **Needs Testing** | Composite templates written, awaiting retrained model |
+| GCS Upload | **Working** | Content-addressed, public URLs |
+| Infill Templates | Code Written | `create_template.py` — superseded by `batch_generate.py` composites for batch pipeline |
 | SQLite State Machine | Code Written | Quadrant BLOB storage, generation tracking |
-| Auto-Generation | Code Written | Spiral + strip planners |
+| Auto-Generation | Code Written | Spiral + strip planners (`seed_tiles.py` has azimuth bug) |
 | Generation Manager UI | Code Written | Web app on port 8080 |
 | Bounds Visualizer | Code Written | Web app on port 8081 |
 | Color Replacement | Code Written | Soft-blend, for water correction |

@@ -1,10 +1,9 @@
 """
-Plan a grid of overlapping isometric tiles.
+Plan a grid of non-overlapping isometric tiles.
 
 Given a center lat/lng and an m×n grid, this script creates a directory of
-tile folders, each containing its own view.json. Tiles overlap by 50%
-horizontally and vertically so that neighboring tiles share half their
-content for seamless stitching.
+tile folders, each containing its own view.json. Tiles are placed edge-to-edge
+with no overlap, matching the original author's quadrant approach.
 
 Usage:
     python -m sprite_nyc.plan_tiles \
@@ -47,38 +46,52 @@ def offset_lat_lng(
     return lat + dlat, lng + dlng
 
 
-# ── Isometric frustum size ────────────────────────────────────────────
+# ── Isometric frustum stepping ────────────────────────────────────────
 
-def tile_ground_footprint(cfg: dict) -> tuple[float, float]:
+def tile_step_vectors(cfg: dict) -> tuple[tuple[float, float], tuple[float, float]]:
     """
-    Return the (east, north) extent in metres of one tile's ground
-    coverage, taking into account the orthographic view height and
-    aspect ratio.
+    Return camera-aligned step vectors for non-overlapping tiling.
 
-    For an ortho camera the visible ground width/height in metres
-    equals the camera frustum size projected onto the ground plane.
-    At a 45° elevation the vertical frustum dimension maps to
-    ground_north = view_height / sin(45°). The horizontal dimension
-    maps similarly, scaled by the aspect ratio.
+    The orthographic camera is rotated by azimuth and tilted by
+    elevation.  Steps move by the full tile width/height along the
+    camera's own axes so adjacent tiles are non-overlapping.
+
+    Returns
+    -------
+    col_step : (east_m, north_m)
+        Ground shift that moves the image content by the full tile
+        width (one column to the right).
+    row_step : (east_m, north_m)
+        Ground shift that moves the image content by the full tile
+        height (one row downward).
     """
     vh = cfg["view_height_meters"]
     aspect = cfg["width"] / cfg["height"]
-    el = abs(cfg["elevation"])
-    az = abs(cfg["azimuth"])
+    el_rad = math.radians(abs(cfg["elevation"]))
+    az_rad = math.radians(cfg["azimuth"])
 
-    sin_el = math.sin(math.radians(el))
-    cos_az = math.cos(math.radians(az))
-    sin_az = math.sin(math.radians(az))
+    full_w = vh * aspect  # camera frustum full width in metres
+    full_h = vh           # camera frustum full height in metres
 
-    # Ground extent along north and east for the vertical camera axis
-    north_extent = vh / sin_el
-    east_extent = vh * aspect / sin_el
+    # The camera is positioned at (azimuth from North, elevation above
+    # horizon) and looks back toward the center.  In this isometric view
+    # the camera's right axis in ENU is (-cos(az), sin(az), 0) — roughly
+    # westward for az = -15°.  "Right in the image" therefore corresponds
+    # to westward on the ground.
+    #
+    # Column step: shift the camera by full_w along camera-right so the
+    # image content scrolls left by 1024 px (= next column to the right).
+    col_step_east = -full_w * math.cos(az_rad)
+    col_step_north = full_w * math.sin(az_rad)
 
-    # Rotate by azimuth to get axis-aligned extents
-    ground_east = abs(east_extent * cos_az) + abs(north_extent * sin_az)
-    ground_north = abs(east_extent * sin_az) + abs(north_extent * cos_az)
+    # Row step: shift the camera so the image content scrolls up by
+    # 1024 px (= next row downward).  The ground distance is stretched
+    # by 1/sin(elevation) due to the oblique view angle.
+    ground_h = full_h / math.sin(el_rad)
+    row_step_east = ground_h * math.sin(az_rad)
+    row_step_north = ground_h * math.cos(az_rad)
 
-    return ground_east, ground_north
+    return (col_step_east, col_step_north), (row_step_east, row_step_north)
 
 
 # ── Main planning logic ──────────────────────────────────────────────
@@ -94,15 +107,11 @@ def plan_tile_grid(
     Return a list of tile descriptors: dicts with
     ``row``, ``col``, and a copy of *cfg* with an adjusted ``center``.
 
-    Tiles overlap by 50% — each step moves half the tile footprint.
-    The (0, 0) tile is centred on the provided coordinates; negative
-    indices extend left/up.
+    Tiles are non-overlapping — each step moves the full camera frustum
+    along the camera's image axes.  Both column and row steps have
+    east *and* north components due to the azimuth rotation.
     """
-    east_extent, north_extent = tile_ground_footprint(cfg)
-
-    # 50% overlap → step = half the extent
-    step_east = east_extent / 2
-    step_north = north_extent / 2
+    col_step, row_step = tile_step_vectors(cfg)
 
     tiles: list[dict] = []
     for r in range(rows):
@@ -111,8 +120,8 @@ def plan_tile_grid(
             offset_c = c - (cols - 1) / 2
             offset_r = r - (rows - 1) / 2
 
-            east_m = offset_c * step_east
-            north_m = -offset_r * step_north  # rows go south
+            east_m = offset_c * col_step[0] + offset_r * row_step[0]
+            north_m = offset_c * col_step[1] + offset_r * row_step[1]
 
             tile_lat, tile_lng = offset_lat_lng(
                 center_lat, center_lng, east_m, north_m

@@ -55,33 +55,54 @@ def quadrant_id(x: int, y: int) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def calculate_step_degrees(config: dict) -> tuple[float, float]:
+def tile_step_vectors(
+    config: dict,
+) -> tuple[tuple[float, float], tuple[float, float]]:
     """
-    Calculate the lat/lng step between adjacent quadrants.
+    Return camera-aligned step vectors for non-overlapping quadrant tiling.
 
-    Each quadrant is one view-sized tile. With the isometric projection,
-    the ground footprint depends on view_height_meters and the
-    camera angles.
+    The orthographic camera is rotated by azimuth and tilted by
+    elevation.  Steps move by the full tile width/height along the
+    camera's own axes so adjacent quadrants are non-overlapping.
+
+    Returns
+    -------
+    col_step : (east_m, north_m)
+        Ground shift for one column right in the image.
+    row_step : (east_m, north_m)
+        Ground shift for one row down in the image.
     """
     vh = config["view_height_meters"]
     aspect = config["width"] / config["height"]
-    el = abs(config.get("elevation", -45))
+    el_rad = math.radians(abs(config.get("elevation", -45)))
+    az_rad = math.radians(config.get("azimuth", -15))
 
-    sin_el = math.sin(math.radians(el))
+    full_w = vh * aspect
+    full_h = vh
 
-    # Ground extent in meters
-    north_m = vh / sin_el
-    east_m = vh * aspect / sin_el
+    # Column step along camera-right (roughly westward for az=-15deg)
+    col_step_east = -full_w * math.cos(az_rad)
+    col_step_north = full_w * math.sin(az_rad)
 
-    # Step = half the extent (50% overlap)
-    step_north = north_m / 2
-    step_east = east_m / 2
+    # Row step along camera-down (stretched by 1/sin(elevation))
+    ground_h = full_h / math.sin(el_rad)
+    row_step_east = ground_h * math.sin(az_rad)
+    row_step_north = ground_h * math.cos(az_rad)
 
-    center_lat = config["center"]["lat"]
-    step_lat = step_north / meters_per_degree_lat()
-    step_lng = step_east / meters_per_degree_lng(center_lat)
+    return (col_step_east, col_step_north), (row_step_east, row_step_north)
 
-    return step_lat, step_lng
+
+def meters_to_grid(
+    east_m: float,
+    north_m: float,
+    col_step: tuple[float, float],
+    row_step: tuple[float, float],
+) -> tuple[float, float]:
+    """Convert (east, north) meter offset to fractional grid (x, y)."""
+    det = col_step[0] * row_step[1] - col_step[1] * row_step[0]
+    x = (east_m * row_step[1] - north_m * row_step[0]) / det
+    y = (north_m * col_step[0] - east_m * col_step[1]) / det
+    return x, y
 
 
 def seed_database(generation_dir: Path) -> int:
@@ -117,23 +138,38 @@ def seed_database(generation_dir: Path) -> int:
         min_lng = seed_lng - 0.01
         max_lng = seed_lng + 0.01
 
-    step_lat, step_lng = calculate_step_degrees(config)
+    col_step, row_step = tile_step_vectors(config)
+    m_lat = meters_per_degree_lat()
+    m_lng = meters_per_degree_lng(seed_lat)
+
+    # Convert geographic bounds corners to grid coordinates
+    corner_offsets = [
+        ((min_lng - seed_lng) * m_lng, (min_lat - seed_lat) * m_lat),
+        ((max_lng - seed_lng) * m_lng, (min_lat - seed_lat) * m_lat),
+        ((min_lng - seed_lng) * m_lng, (max_lat - seed_lat) * m_lat),
+        ((max_lng - seed_lng) * m_lng, (max_lat - seed_lat) * m_lat),
+    ]
+    grid_xs, grid_ys = [], []
+    for east, north in corner_offsets:
+        gx, gy = meters_to_grid(east, north, col_step, row_step)
+        grid_xs.append(gx)
+        grid_ys.append(gy)
+
+    min_x = math.floor(min(grid_xs))
+    max_x = math.ceil(max(grid_xs))
+    min_y = math.floor(min(grid_ys))
+    max_y = math.ceil(max(grid_ys))
 
     count = 0
     cursor = conn.cursor()
 
-    # Calculate x,y grid range
-    # x increases east (lng increases), y increases south (lat decreases)
-    min_x = math.floor((min_lng - seed_lng) / step_lng)
-    max_x = math.ceil((max_lng - seed_lng) / step_lng)
-    min_y = math.floor((seed_lat - max_lat) / step_lat)  # note: inverted
-    max_y = math.ceil((seed_lat - min_lat) / step_lat)
-
     for y in range(min_y, max_y + 1):
         for x in range(min_x, max_x + 1):
-            qid = quadrant_id(x, y)
-            lat = seed_lat - y * step_lat  # y increases southward
-            lng = seed_lng + x * step_lng
+            # Compute lat/lng from camera-aligned grid position
+            east_m = x * col_step[0] + y * row_step[0]
+            north_m = x * col_step[1] + y * row_step[1]
+            lat = seed_lat + north_m / m_lat
+            lng = seed_lng + east_m / m_lng
 
             # Check bounds
             if lat < min_lat or lat > max_lat:
@@ -141,6 +177,7 @@ def seed_database(generation_dir: Path) -> int:
             if lng < min_lng or lng > max_lng:
                 continue
 
+            qid = quadrant_id(x, y)
             cursor.execute(
                 """
                 INSERT OR IGNORE INTO quadrants (id, lat, lng, x, y)

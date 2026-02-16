@@ -14,7 +14,17 @@
       "Bash(uv pip uninstall:*)",
       "Bash(uv run ruff check:*)",
       "WebFetch(domain:docs.oxen.ai)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(echo:*)",
+      "Bash(curl:*)",
+      "Bash(python -c:*)",
+      "Bash(for d in D:/WebProjects/sprite-nyc/output/test_grid/tile_*/)",
+      "Bash(done)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(taskkill:*)",
+      "Bash(export:*)",
+      "Bash(OXEN_INFILL_V02_API_KEY=\"SFMyNTY.g2gDbQAAAC9hcGlfa2V5X3YxOmZjMDhkNjBiLWZjZmQtNDI3NC05YjJkLTNiNGFkYTFkNzFmYW4GAEOtKk2cAWIAAVGA.SB0VYC39PPMutd5Q5_6QsfGhROePVpMGM-nJ8WWc8iY\" uv run python:*)"
     ]
   }
 }

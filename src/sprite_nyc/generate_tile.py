@@ -30,9 +30,13 @@ from sprite_nyc.gcs_upload import upload_pil_image
 
 
 OXEN_API_URL = "https://hub.oxen.ai/api/images/edit"
-OXEN_MODEL = "mike804-nice-aqua-muskox"
+OXEN_MODEL = "mike804-crazy-yellow-constrictor"
 NUM_INFERENCE_STEPS = 28
-PROMPT = "Convert to <isometric nyc pixel art>"
+PROMPT = (
+    "Fill in the outlined section with the missing pixels "
+    "corresponding to the <sprite nyc pixel art> style. "
+    "The red border indicates the region to generate."
+)
 
 
 def load_tile_image(tile_dir: Path, name: str) -> Image.Image | None:

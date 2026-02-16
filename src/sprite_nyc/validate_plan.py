@@ -2,7 +2,7 @@
 Validate a tile plan by stitching all rendered tiles into a single image.
 
 Reads the manifest.json produced by plan_tiles.py, finds render.png in each
-tile folder, and composites them using the 50% overlap.
+tile folder, and composites them side-by-side (non-overlapping).
 
 Usage:
     python -m sprite_nyc.validate_plan --tiles-dir tiles/ --output-dir validation/
@@ -25,10 +25,10 @@ def stitch_tiles(
     """
     Stitch tile images into a single composite.
 
-    With 50% overlap, each tile step is half the tile dimension.
+    Tiles are non-overlapping — each tile step equals the full tile dimension.
     The composite size is:
-        width  = tile_w / 2 * (cols + 1)
-        height = tile_h / 2 * (rows + 1)
+        width  = tile_w * cols
+        height = tile_h * rows
     """
     manifest_path = tiles_dir / "manifest.json"
     if not manifest_path.exists():
@@ -58,13 +58,9 @@ def stitch_tiles(
     first_img = Image.open(first_img_path)
     tile_w, tile_h = first_img.size
 
-    # With 50% overlap, step = half tile size
-    step_x = tile_w // 2
-    step_y = tile_h // 2
-
-    # Composite dimensions
-    comp_w = step_x * (cols - 1) + tile_w
-    comp_h = step_y * (rows - 1) + tile_h
+    # Non-overlapping: step = full tile size
+    comp_w = tile_w * cols
+    comp_h = tile_h * rows
 
     composite = Image.new("RGBA", (comp_w, comp_h), (0, 0, 0, 0))
 
@@ -76,10 +72,9 @@ def stitch_tiles(
             continue
 
         img = Image.open(tile_path).convert("RGBA")
-        x = c * step_x
-        y = r * step_y
+        x = c * tile_w
+        y = r * tile_h
 
-        # Alpha-blend onto composite (later tiles on top)
         composite.paste(img, (x, y), img)
 
     return composite

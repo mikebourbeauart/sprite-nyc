@@ -1,32 +1,103 @@
 # 04 — Simulation Systems
 
-## Architecture: Entity-Component-System (Lightweight)
+## Architecture: Becsy ECS
 
-No need for a full ECS framework. A simple loop with typed arrays:
+Using [Becsy](https://github.com/LastOliveGames/becsy) as the ECS framework. It supports string fields natively (via `Type.staticString` and `Type.dynamicString`), stores data in contiguous buffers for cache efficiency, and has built-in multithreading via Web Workers for scaling to thousands of entities.
+
+### Why Becsy over bitECS
+- **String support**: `currentEdge`, `spriteId`, `pathQueue` are all strings. bitECS only supports numeric typed arrays, requiring constant map lookups that negate its speed advantage.
+- **Variable-length data**: Path queues (arrays of edge IDs) can't be stored in bitECS at all. Becsy handles object-type fields.
+- **Multithreading**: Becsy can split systems across Web Workers. Traffic and pedestrian systems are independent and parallelizable.
+- **Built-in system scheduling**: Declares read/write dependencies between systems, enabling automatic parallelization.
+
+### Components
 
 ```typescript
-interface Entity {
-  id: number
-  type: 'car' | 'pedestrian' | 'bus' | 'taxi'
-  x: number           // world pixel position
-  y: number
-  speed: number       // pixels per second
-  heading: number     // radians
-  currentEdge: string // road edge ID
-  edgeProgress: number // 0..1 along edge
-  pathQueue: string[] // remaining edge IDs to traverse
-  state: EntityState
-  spriteId: string    // which sprite variant to render
+import { component, Type, field } from '@lastolivegames/becsy'
+
+@component class Position {
+  @field(Type.float32) declare x: number    // world pixel position
+  @field(Type.float32) declare y: number
 }
 
-type EntityState =
-  | 'moving'
-  | 'waiting_at_light'
-  | 'yielding'
-  | 'parking'       // cars only
-  | 'entering'      // pedestrians entering building
-  | 'exiting'       // pedestrians leaving building
-  | 'idle'          // pedestrians standing
+@component class Movement {
+  @field(Type.float32) declare speed: number     // pixels per second
+  @field(Type.float32) declare heading: number   // radians
+}
+
+@component class PathFollower {
+  @field(Type.dynamicString(64)) declare currentEdge: string  // road edge ID
+  @field(Type.float32) declare edgeProgress: number           // 0..1 along edge
+  @field(Type.object) declare pathQueue: string[]             // remaining edge IDs
+}
+
+@component class Renderable {
+  @field(Type.dynamicString(32)) declare spriteId: string
+}
+
+@component class Vehicle {
+  @field(Type.staticString([
+    'sedan', 'taxi', 'suv', 'bus', 'delivery_van'
+  ])) declare vehicleType: string
+}
+
+@component class Pedestrian {
+  @field(Type.dynamicString(64)) declare destination: string
+  @field(Type.float32) declare departureDelay: number
+}
+
+@component class EntityState {
+  @field(Type.staticString([
+    'moving', 'waiting_at_light', 'yielding', 'parking',
+    'entering', 'exiting', 'idle'
+  ])) declare state: string
+}
+```
+
+### World Setup
+
+```typescript
+import { World } from '@lastolivegames/becsy'
+
+const world = await World.create({
+  maxEntities: 10_000,
+  defs: [
+    // systems (defined below)
+    TrafficSystem, PedestrianSystem, TrafficLightSystem, SpawnSystem,
+    // components registered automatically via system declarations
+  ]
+})
+
+// Game loop
+function tick(dt: number) {
+  world.execute(dt)
+}
+```
+
+### Spawning Entities
+
+```typescript
+function spawnVehicle(world: World, edge: string, vehicleType: string, spriteId: string) {
+  world.createEntity(
+    Position, { x: 0, y: 0 },
+    Movement, { speed: 0, heading: 0 },
+    PathFollower, { currentEdge: edge, edgeProgress: 0, pathQueue: [] },
+    Renderable, { spriteId },
+    Vehicle, { vehicleType },
+    EntityState, { state: 'moving' },
+  )
+}
+
+function spawnPedestrian(world: World, edge: string, destination: string) {
+  world.createEntity(
+    Position, { x: 0, y: 0 },
+    Movement, { speed: 0, heading: 0 },
+    PathFollower, { currentEdge: edge, edgeProgress: 0, pathQueue: [] },
+    Renderable, { spriteId: 'ped_walk' },
+    Pedestrian, { destination, departureDelay: 0 },
+    EntityState, { state: 'moving' },
+  )
+}
 ```
 
 ## System 1: Traffic
@@ -84,34 +155,53 @@ Default cycle: 30s green, 5s yellow, 30s green (perpendicular). Derived from int
 Simple: each car checks distance to the car ahead on the same lane. If too close, decelerate. If far, accelerate up to road speed limit.
 
 ```typescript
-function updateVehicle(entity: Entity, dt: number, graph: RoadGraph) {
-  const edge = graph.edges.get(entity.currentEdge)
-  const maxSpeed = speedForRoadType(edge.highway) // px/s
+import { system, System } from '@lastolivegames/becsy'
 
-  // Check car ahead
-  const carAhead = findCarAheadOnEdge(entity)
-  if (carAhead && distanceTo(carAhead) < MIN_FOLLOWING_DISTANCE) {
-    entity.speed = Math.max(0, entity.speed - DECEL * dt)
-  } else {
-    entity.speed = Math.min(maxSpeed, entity.speed + ACCEL * dt)
+@system class TrafficSystem extends System {
+  // Declare queries — Becsy auto-tracks matching entities
+  vehicles = this.query(q => q.current.with(Vehicle, Position, Movement, PathFollower, EntityState))
+
+  execute() {
+    const dt = this.delta / 1000  // Becsy provides delta in ms
+
+    for (const entity of this.vehicles.current) {
+      const path = entity.read(PathFollower)
+      const movement = entity.write(Movement)
+      const pos = entity.write(Position)
+      const state = entity.read(EntityState)
+
+      if (state.state !== 'moving') continue
+
+      const edge = roadGraph.edges.get(path.currentEdge)
+      const maxSpeed = speedForRoadType(edge.highway)
+
+      // Check car ahead (via spatial hash)
+      const carAhead = findCarAheadOnEdge(entity, path.currentEdge)
+      if (carAhead && distanceTo(carAhead, pos) < MIN_FOLLOWING_DISTANCE) {
+        movement.speed = Math.max(0, movement.speed - DECEL * dt)
+      } else {
+        movement.speed = Math.min(maxSpeed, movement.speed + ACCEL * dt)
+      }
+
+      // Check traffic light at upcoming intersection
+      if (approachingIntersection(path) && lightIsRed(path)) {
+        movement.speed = Math.max(0, movement.speed - HARD_DECEL * dt)
+      }
+
+      // Advance along edge
+      const pathW = entity.write(PathFollower)
+      pathW.edgeProgress += (movement.speed * dt) / edge.length
+      if (pathW.edgeProgress >= 1.0) {
+        advanceToNextEdge(pathW)
+      }
+
+      // Update pixel position from edge progress
+      const screenPos = interpolateEdge(edge.screenPath, pathW.edgeProgress)
+      pos.x = screenPos[0]
+      pos.y = screenPos[1]
+      movement.heading = edgeHeadingAt(edge, pathW.edgeProgress)
+    }
   }
-
-  // Check traffic light at upcoming intersection
-  if (approachingIntersection(entity) && lightIsRed(entity)) {
-    entity.speed = Math.max(0, entity.speed - HARD_DECEL * dt)
-  }
-
-  // Advance along edge
-  entity.edgeProgress += (entity.speed * dt) / edge.length
-  if (entity.edgeProgress >= 1.0) {
-    advanceToNextEdge(entity)
-  }
-
-  // Update pixel position from edge progress
-  const pos = interpolateEdge(edge.screenPath, entity.edgeProgress)
-  entity.x = pos[0]
-  entity.y = pos[1]
-  entity.heading = edgeHeadingAt(edge, entity.edgeProgress)
 }
 ```
 
@@ -168,22 +258,41 @@ Pedestrians don't follow strict graph edges like cars. Instead:
 3. **Crowd behavior**: If density on a sidewalk segment is high, slow down
 
 ```typescript
-function updatePedestrian(entity: Entity, dt: number) {
-  // Jitter: slight random offset perpendicular to path
-  const jitter = (Math.random() - 0.5) * JITTER_AMOUNT
+@system class PedestrianSystem extends System {
+  pedestrians = this.query(q => q.current.with(Pedestrian, Position, Movement, PathFollower, EntityState))
 
-  // Crowd density check
-  const density = getPedestrianDensity(entity.currentEdge)
-  const crowdFactor = Math.max(0.3, 1 - density * 0.1)
+  execute() {
+    const dt = this.delta / 1000
 
-  entity.speed = BASE_WALK_SPEED * crowdFactor
-  entity.edgeProgress += (entity.speed * dt) / edgeLength
+    for (const entity of this.pedestrians.current) {
+      const state = entity.read(EntityState)
+      if (state.state !== 'moving') continue
 
-  // Apply jitter perpendicular to heading
-  const perpX = -Math.sin(entity.heading) * jitter
-  const perpY = Math.cos(entity.heading) * jitter
-  entity.x = baseX + perpX
-  entity.y = baseY + perpY
+      const path = entity.read(PathFollower)
+      const movement = entity.write(Movement)
+      const pos = entity.write(Position)
+
+      // Jitter: slight random offset perpendicular to path
+      const jitter = (Math.random() - 0.5) * JITTER_AMOUNT
+
+      // Crowd density check (via spatial hash)
+      const density = getPedestrianDensity(path.currentEdge)
+      const crowdFactor = Math.max(0.3, 1 - density * 0.1)
+
+      movement.speed = BASE_WALK_SPEED * crowdFactor
+      const pathW = entity.write(PathFollower)
+      const edge = sidewalkGraph.edges.get(path.currentEdge)
+      pathW.edgeProgress += (movement.speed * dt) / edge.length
+
+      // Update position with jitter
+      const basePos = interpolateEdge(edge.screenPath, pathW.edgeProgress)
+      const perpX = -Math.sin(movement.heading) * jitter
+      const perpY = Math.cos(movement.heading) * jitter
+      pos.x = basePos[0] + perpX
+      pos.y = basePos[1] + perpY
+      movement.heading = edgeHeadingAt(edge, pathW.edgeProgress)
+    }
+  }
 }
 ```
 
@@ -200,12 +309,11 @@ When a pedestrian's path crosses a road:
 At popular POIs (subway exits, Times Square, etc.), spawn bursts of 10–20 pedestrians that disperse in different directions. This creates natural-looking crowd pulses.
 
 ```typescript
-function spawnCrowdBurst(poi: POI, count: number) {
+function spawnCrowdBurst(world: World, poi: POI, count: number) {
   for (let i = 0; i < count; i++) {
-    const ped = spawnPedestrian(poi.entrance)
-    ped.destination = pickRandomNearbyDestination(poi, radius: 500)
-    // Stagger departure so they don't all move at once
-    ped.departureDelay = Math.random() * 3.0 // seconds
+    const dest = pickRandomNearbyDestination(poi, 500)
+    spawnPedestrian(world, poi.entranceEdge, dest)
+    // Stagger departure via departureDelay field on Pedestrian component
   }
 }
 ```
@@ -238,37 +346,48 @@ At night, building windows could randomly light up using small yellow/warm sprit
 
 ## Spatial Indexing
 
-With 500+ entities, naive collision/proximity checks are O(n^2). Use a spatial hash:
+With thousands of entities, naive collision/proximity checks are O(n^2). Use a spatial hash, rebuilt each frame:
 
 ```typescript
 class SpatialHash {
   private cellSize: number = 64  // pixels
-  private grid: Map<string, Entity[]> = new Map()
+  private grid: Map<number, Entity[]> = new Map()  // int key for speed
+
+  private key(x: number, y: number): number {
+    return (Math.floor(x / this.cellSize) << 16) | (Math.floor(y / this.cellSize) & 0xFFFF)
+  }
 
   insert(entity: Entity) {
-    const key = `${Math.floor(entity.x / this.cellSize)},${Math.floor(entity.y / this.cellSize)}`
-    // ...
+    const k = this.key(entity.x, entity.y)
+    let bucket = this.grid.get(k)
+    if (!bucket) { bucket = []; this.grid.set(k, bucket) }
+    bucket.push(entity)
   }
 
   queryRadius(x: number, y: number, radius: number): Entity[] {
     // Check cells within radius, return entities
   }
+
+  clear() { this.grid.clear() }
 }
 ```
 
-Rebuild the hash each frame (cheap for <2000 entities).
+The spatial hash is shared state accessed by both TrafficSystem and PedestrianSystem. In single-threaded mode, rebuild once per frame before systems run. If using Becsy's multithreading, the hash should be rebuilt in a dedicated system that runs before traffic/pedestrian systems (Becsy's scheduler handles ordering via read/write declarations).
 
 ## Simulation Budget
 
-Target: entire simulation update in <4ms per frame (leaving 12ms for rendering at 60fps).
+Target: entire simulation update in <8ms per frame (leaving 8ms for rendering at 60fps). Becsy's multithreading can split traffic + pedestrian systems across workers when needed.
 
-| System | Budget |
-|--------|--------|
-| Vehicle updates (200 entities) | 1ms |
-| Pedestrian updates (300 entities) | 1ms |
-| Spatial hash rebuild | 0.5ms |
-| Traffic light ticks | 0.1ms |
-| Spawn/despawn logic | 0.3ms |
-| **Total** | **~3ms** |
+| System | Budget (single-threaded) | Multithreaded |
+|--------|--------------------------|---------------|
+| Vehicle updates (2000 entities) | 3ms | ~1.5ms |
+| Pedestrian updates (3000 entities) | 3ms | ~1.5ms |
+| Spatial hash rebuild | 1ms | 1ms |
+| Traffic light ticks | 0.1ms | 0.1ms |
+| Spawn/despawn logic | 0.5ms | 0.5ms |
+| **Total** | **~7.5ms** | **~4.5ms** |
 
-If performance is tight, reduce entity count or simulate distant entities at lower frequency (every 4th frame).
+### Scaling strategies for >5000 entities
+- **LOD simulation**: Only fully simulate entities near the viewport. Distant entities update every 4th frame or use simplified movement (advance edgeProgress without car-following checks).
+- **Multithreading**: Enable Becsy's Web Worker mode to parallelize TrafficSystem and PedestrianSystem.
+- **Hybrid frequency**: Traffic lights and spawn logic run at 10Hz instead of 60Hz (timer accumulation).

@@ -59,6 +59,120 @@ class QuadrantPosition:
 
 # ── Validation ────────────────────────────────────────────────────────
 
+def _has_generated_on_side(
+    grid: dict[tuple[int, int], QuadrantPosition],
+    side: str,
+    bbox: tuple[int, int, int, int],
+) -> bool:
+    """Check if ANY cell along a side of the bounding box has a GENERATED neighbor.
+
+    bbox is (min_x, min_y, max_x, max_y) inclusive.
+    """
+    min_x, min_y, max_x, max_y = bbox
+    if side == "top":
+        for x in range(min_x, max_x + 1):
+            nb = grid.get((x, min_y - 1))
+            if nb and nb.state == QuadrantState.GENERATED:
+                return True
+    elif side == "bottom":
+        for x in range(min_x, max_x + 1):
+            nb = grid.get((x, max_y + 1))
+            if nb and nb.state == QuadrantState.GENERATED:
+                return True
+    elif side == "left":
+        for y in range(min_y, max_y + 1):
+            nb = grid.get((min_x - 1, y))
+            if nb and nb.state == QuadrantState.GENERATED:
+                return True
+    elif side == "right":
+        for y in range(min_y, max_y + 1):
+            nb = grid.get((max_x + 1, y))
+            if nb and nb.state == QuadrantState.GENERATED:
+                return True
+    return False
+
+
+def validate_seam_rules(
+    selected: list[QuadrantPosition],
+    grid: dict[tuple[int, int], QuadrantPosition],
+) -> list[str]:
+    """Validate seam prevention rules for a selection.
+
+    Prevents the model from being asked to seamlessly blend with
+    pre-existing pixel art on all sides simultaneously, which produces
+    visible seams.
+
+    Rules by selection shape:
+      - 1×1: max 3 generated cardinal neighbors (not all 4)
+      - 1×2 (tall): no generated on BOTH left AND right simultaneously
+      - 2×1 (wide): no generated on BOTH top AND bottom simultaneously
+      - 2×2: no generated cardinal neighbors at all
+    """
+    errors: list[str] = []
+    if not selected:
+        return errors
+
+    # Compute bounding box of selection
+    xs = [q.x for q in selected]
+    ys = [q.y for q in selected]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    w = max_x - min_x + 1
+    h = max_y - min_y + 1
+
+    # Must be rectangular and fit within 2×2
+    if w > 2 or h > 2:
+        errors.append(f"Selection bounding box {w}×{h} exceeds max 2×2")
+        return errors
+
+    if len(selected) != w * h:
+        errors.append("Selection must be rectangular (fill the bounding box)")
+        return errors
+
+    bbox = (min_x, min_y, max_x, max_y)
+
+    if w == 1 and h == 1:
+        # 1×1: max 3 generated cardinal neighbors
+        gen_sides = sum(
+            1
+            for side in ("top", "bottom", "left", "right")
+            if _has_generated_on_side(grid, side, bbox)
+        )
+        if gen_sides >= 4:
+            errors.append(
+                "1×1 selection has generated neighbors on all 4 sides — "
+                "would cause seams"
+            )
+    elif w == 1 and h == 2:
+        # 1×2 (tall): no generated on BOTH left AND right
+        if _has_generated_on_side(grid, "left", bbox) and _has_generated_on_side(
+            grid, "right", bbox
+        ):
+            errors.append(
+                "1×2 selection has generated neighbors on both left and right — "
+                "would cause seams"
+            )
+    elif w == 2 and h == 1:
+        # 2×1 (wide): no generated on BOTH top AND bottom
+        if _has_generated_on_side(grid, "top", bbox) and _has_generated_on_side(
+            grid, "bottom", bbox
+        ):
+            errors.append(
+                "2×1 selection has generated neighbors on both top and bottom — "
+                "would cause seams"
+            )
+    elif w == 2 and h == 2:
+        # 2×2: no generated cardinal neighbors at all
+        for side in ("top", "bottom", "left", "right"):
+            if _has_generated_on_side(grid, side, bbox):
+                errors.append(
+                    f"2×2 selection has generated neighbor on {side} — "
+                    "would cause seams"
+                )
+
+    return errors
+
+
 def validate_generation_config(
     selected: list[QuadrantPosition],
     grid: dict[tuple[int, int], QuadrantPosition],
@@ -118,6 +232,9 @@ def validate_generation_config(
                 break
         if not has_generated_neighbor:
             errors.append("No selected quadrant has a generated neighbor")
+
+    # Seam prevention rules
+    errors.extend(validate_seam_rules(selected, grid))
 
     return errors
 
