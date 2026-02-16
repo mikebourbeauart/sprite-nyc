@@ -27,16 +27,23 @@ Stage (PixiJS Application)
 ├── TileLayer (Container)
 │   ├── visible tile sprites loaded from DZI pyramid
 │   └── culled/loaded based on viewport (replaces OpenSeaDragon)
+├── UndergroundLayer (Container, toggleable — see 08_public_transit.md)
+│   ├── SubwayLineGraphics (colored track polylines from static GTFS)
+│   ├── StationMarkers (platform sprites at stops)
+│   ├── TrainSprites (moving trains from real-time MTA GTFS-RT)
+│   └── PlatformPassengers (waiting pedestrian sprites)
 ├── RoadDebugLayer (Container, toggleable)
 │   └── Graphics objects drawing road edges, intersections
 ├── SpriteLayer (Container)
 │   ├── BuildingOverlays (door markers, info popups)
 │   ├── Vehicles (cars, buses, taxis — sorted by Y)
+│   ├── MTA Buses (real-time positions from SIRI/GTFS-RT)
 │   ├── Pedestrians (NPCs — sorted by Y)
 │   └── TrafficLights (cycling signal sprites)
 └── UILayer (Container, fixed to screen)
     ├── Minimap
     ├── Controls (speed, density sliders)
+    ├── Underground toggle button
     └── Info panel
 ```
 
@@ -125,6 +132,12 @@ app.ticker.add((delta) => {
 })
 ```
 
+## Building Occlusion
+
+Sprites behind tall buildings must be hidden. A pre-baked depth texture (generated offline from OSM building footprints + heights) is sampled by a custom PixiJS shader at runtime. Fragments where the sprite's isometric depth exceeds the depth map value are discarded — giving per-pixel partial occlusion. See **09_building_occlusion.md** for full details.
+
+The depth map is tiled and loaded like DZI tiles (viewport-culled, LRU cached). A spatial hash check skips the depth test for sprites on open roads away from buildings.
+
 ## Performance Considerations
 
 | Concern | Mitigation |
@@ -134,3 +147,4 @@ app.ticker.add((delta) => {
 | Sort cost | Only sort sprites that moved this frame (dirty flag) |
 | Draw calls | Sprite sheets batch into single draw calls per sheet |
 | Off-screen simulation | Hybrid: full sim near camera, simplified sim far away |
+| Depth occlusion | Hybrid filter — only sprites near buildings get depth-tested (see 09_building_occlusion.md) |

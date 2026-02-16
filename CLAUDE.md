@@ -38,7 +38,7 @@ Serve `viewer/` with any static file server.
 ### E2E Pipeline Flow (quadrant-based, large-scale)
 1. **Plan** (`plan_tiles.py`) — Convert lat/lng center + grid dimensions into a tile manifest with 50% overlapping positions
 2. **Render** (`export_views.py`) — Playwright captures 3D tile views from the web renderer
-3. **Template** (`e2e_generation/infill_template.py`) — Compose infill template with 1 ring of neighbor context
+3. **Template** (`e2e_generation/infill_template.py`) — Compose 2×2 infill template (1024×1024) with neighbor context
 4. **Upload** (`gcs_upload.py`) — Upload template to GCS bucket (Oxen API requires public URLs)
 5. **Generate** (`generate_tile_oxen.py`) — Call Oxen.ai fine-tuned model to produce pixel art
 6. **Export** (`e2e_generation/export_tiles.py`) — Stitch all quadrants into DZI tile pyramid for OpenSeaDragon
@@ -60,8 +60,8 @@ Serve `viewer/` with any static file server.
 ### Critical Conventions
 
 - **Non-overlapping tiles**: Tiles are placed edge-to-edge with no overlap, matching the original author's quadrant approach. Grid step = full tile size.
-- **Red border convention**: 1px red (#FF0000) borders mark regions for AI to generate. The model is fine-tuned to recognize these. The red-bordered region should be 1/9 of the template image (center of a 3×3 grid).
-- **3×3 templates**: `batch_generate.py` builds 3×3 non-overlapping templates (3072×3072 for 1024 tiles) with the target tile's render + red border at center, surrounded by 8 neighbor tiles as pixel art context.
+- **Red border convention**: 1px red (#FF0000) borders mark regions for AI to generate. The model is fine-tuned to recognize these. The red-bordered region is 1/4 of the template (one 512×512 cell in a 2×2 grid).
+- **2×2 templates at 1024×1024 (model native resolution)**: Both `batch_generate.py` and `infill_template.py` build 1024×1024 templates with 512×512 cells. The target tile's render (downscaled to 512×512) occupies the best corner with a red border; up to 3 neighbor tiles fill remaining cells as pixel art context. Generated 512×512 cells are upscaled to 1024×1024 for storage.
 - **Spiral generation order**: Tiles are generated center-outward in Chebyshev rings, with cardinal neighbors processed before diagonal ones, to maximize available pixel art context for each tile.
 - **Resolution**: Renders are 1024×1024 (set in `view.json`). Training data and model input/output are all 1024×1024. Training generations that are larger must be downscaled to match.
 - **Render/generation size alignment**: When creating training data, renders and generations MUST be the same dimensions. `create_omni_dataset.py` downscales to the smaller of the two sizes to avoid zoom artifacts in red-bordered regions.
@@ -73,6 +73,10 @@ Serve `viewer/` with any static file server.
 ### Known Issues
 
 - **`seed_tiles.py`** has an azimuth stepping bug — it computes axis-aligned east/north steps ignoring the camera rotation. Needs the same fix applied to `plan_tiles.py`.
+
+### Training Data
+
+- **`synthetic_data/omni_v02/`** — Current training dataset for the Oxen LoRA model. Contains `inputs/` (templates with renders + red borders), `targets/` (full pixel art), and `omni_dataset.csv` mapping them with prompts. Variants: full, quadrant, half, middle, rect_strip, rect_infill. Training prompts include `Variant: <type>.` suffix — production prompts must match.
 
 ### Configuration Files
 

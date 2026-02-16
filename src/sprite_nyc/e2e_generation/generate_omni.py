@@ -12,7 +12,6 @@ Provides core functions:
 from __future__ import annotations
 
 import io
-import json
 import sqlite3
 import time
 from pathlib import Path
@@ -36,7 +35,8 @@ NUM_INFERENCE_STEPS = 28
 PROMPT = (
     "Fill in the outlined section with the missing pixels "
     "corresponding to the <sprite nyc pixel art> style. "
-    "The red border indicates the region to be filled."
+    "The red border indicates the region to generate. "
+    "Variant: quadrant."
 )
 
 
@@ -131,21 +131,61 @@ def load_render_from_db(
     return None
 
 
+def _ensure_extra_columns(db_path: Path) -> None:
+    """Add template and prompt columns if they don't exist yet."""
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.execute("PRAGMA table_info(quadrants)")
+    columns = {row[1] for row in cursor}
+    if "template" not in columns:
+        conn.execute("ALTER TABLE quadrants ADD COLUMN template BLOB")
+    if "prompt" not in columns:
+        conn.execute("ALTER TABLE quadrants ADD COLUMN prompt TEXT")
+    conn.commit()
+    conn.close()
+
+
 def save_generation_to_db(
-    db_path: Path, x: int, y: int, image: Image.Image
+    db_path: Path, x: int, y: int, image: Image.Image,
+    template: Image.Image | None = None,
+    prompt: str | None = None,
 ) -> None:
-    """Save a generated image to the DB."""
+    """Save a generated image (and optionally its template/prompt) to the DB."""
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     blob = buf.getvalue()
 
+    tmpl_blob = None
+    if template is not None:
+        tbuf = io.BytesIO()
+        template.save(tbuf, format="PNG")
+        tmpl_blob = tbuf.getvalue()
+
     conn = sqlite3.connect(str(db_path))
     conn.execute(
-        "UPDATE quadrants SET generation = ?, is_generated = 1 WHERE x = ? AND y = ?",
-        (blob, x, y),
+        "UPDATE quadrants SET generation = ?, template = ?, prompt = ?, is_generated = 1 WHERE x = ? AND y = ?",
+        (blob, tmpl_blob, prompt, x, y),
     )
     conn.commit()
     conn.close()
+
+
+def load_template_from_db(
+    db_path: Path, x: int, y: int
+) -> Image.Image | None:
+    """Load a stored template image from the DB."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cursor = conn.execute(
+            "SELECT template FROM quadrants WHERE x = ? AND y = ?", (x, y)
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            return Image.open(io.BytesIO(row[0])).convert("RGBA")
+    except sqlite3.OperationalError:
+        pass  # template column doesn't exist yet
+    finally:
+        conn.close()
+    return None
 
 
 def render_quadrant(
@@ -186,6 +226,7 @@ def run_generation_for_quadrants(
     Returns a dict of (x, y) → generated Image.
     """
     db_path = generation_dir / "quadrants.db"
+    _ensure_extra_columns(db_path)
     grid = load_grid_from_db(db_path)
 
     # Build selected list
@@ -215,7 +256,7 @@ def run_generation_for_quadrants(
             render_lookup[key] = render
 
     # Create template
-    template = create_template_image(selected, grid, render_lookup, tile_size)
+    template, layout = create_template_image(selected, grid, render_lookup, tile_size)
 
     # Save template for debugging
     template_path = generation_dir / "last_template.png"
@@ -238,20 +279,17 @@ def run_generation_for_quadrants(
     elapsed = time.time() - start
     print(f"Generation took {elapsed:.1f}s")
 
-    # The model always works at 1024×1024. The API returns 1024×1024 which
-    # represents the full template (with infilled center) at model resolution.
-    # Upscale to template dimensions and extract the selected tile regions.
-    template_size = template.size
-    if result_image.size != template_size:
-        print(f"Resizing result {result_image.size} -> {template_size}")
-        result_image = result_image.resize(template_size, Image.LANCZOS)
+    # Template is now 1024×1024 — same as model output, no resize needed
+    assert result_image.size == (1024, 1024), (
+        f"Expected 1024×1024 result, got {result_image.size}"
+    )
 
-    # Extract quadrants
-    results = extract_generated_quadrants(result_image, selected, grid, tile_size)
+    # Extract quadrants (crops 512×512 cells, upscales to 1024×1024)
+    results = extract_generated_quadrants(result_image, selected, layout)
 
-    # Save to DB
+    # Save to DB (include the template and prompt that were used)
     for (x, y), img in results.items():
-        save_generation_to_db(db_path, x, y, img)
+        save_generation_to_db(db_path, x, y, img, template=template, prompt=PROMPT)
         print(f"Saved quadrant ({x}, {y})")
 
     return results

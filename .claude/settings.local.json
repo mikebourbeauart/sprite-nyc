@@ -24,7 +24,15 @@
       "Bash(findstr:*)",
       "Bash(taskkill:*)",
       "Bash(export:*)",
-      "Bash(OXEN_INFILL_V02_API_KEY=\"SFMyNTY.g2gDbQAAAC9hcGlfa2V5X3YxOmZjMDhkNjBiLWZjZmQtNDI3NC05YjJkLTNiNGFkYTFkNzFmYW4GAEOtKk2cAWIAAVGA.SB0VYC39PPMutd5Q5_6QsfGhROePVpMGM-nJ8WWc8iY\" uv run python:*)"
+      "Bash(OXEN_INFILL_V02_API_KEY=\"SFMyNTY.g2gDbQAAAC9hcGlfa2V5X3YxOmZjMDhkNjBiLWZjZmQtNDI3NC05YjJkLTNiNGFkYTFkNzFmYW4GAEOtKk2cAWIAAVGA.SB0VYC39PPMutd5Q5_6QsfGhROePVpMGM-nJ8WWc8iY\" uv run python:*)",
+      "WebFetch(domain:bustime.mta.info)",
+      "WebFetch(domain:bustime-beta.mta.info)",
+      "WebFetch(domain:www.mta.info)",
+      "WebFetch(domain:www.transit.land)",
+      "Bash(wmic process where \"commandline like ''%view_generations%''\" get processid,commandline)",
+      "Bash(tasklist:*)",
+      "Bash(set:*)",
+      "Bash(timeout:*)"
     ]
   }
 }

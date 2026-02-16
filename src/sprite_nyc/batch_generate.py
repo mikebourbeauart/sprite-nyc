@@ -2,9 +2,9 @@
 Batch-generate pixel art for a grid of tiles using the Oxen.ai API.
 
 Iterates tiles in spiral order from center outward so each tile has
-neighbor context from previously generated tiles.  Creates 3×3
-non-overlapping templates (matching the e2e pipeline's infill_template
-format) where the target tile is 1/9 of the image with a red border.
+neighbor context from previously generated tiles.  Creates 2×2
+templates at 1024×1024 (model native resolution) with 512×512 cells,
+where the target tile occupies one cell with a red border.
 
 Usage:
     python -m sprite_nyc.batch_generate \
@@ -26,6 +26,8 @@ from sprite_nyc.generate_tile_oxen import generate_from_url, PROMPT
 
 BORDER_COLOR = (255, 0, 0, 255)
 BORDER_WIDTH = 1
+CELL_SIZE = 512
+TEMPLATE_SIZE = 1024
 
 
 def _load_image(path: Path) -> Image.Image | None:
@@ -57,61 +59,97 @@ def _spiral_order(rows: int, cols: int) -> list[tuple[int, int]]:
     return coords
 
 
+def _best_corner(
+    target_row: int,
+    target_col: int,
+    tiles_dir: Path,
+    rows: int,
+    cols: int,
+) -> tuple[int, int]:
+    """Pick the best corner (col_off, row_off) in the 2×2 grid for the target.
+
+    Scores each corner by counting generated neighbors visible in that layout.
+    Cardinal neighbors get weight 2, diagonal weight 1.
+    """
+    best = (0, 0)
+    best_score = -1
+
+    for col_off in (0, 1):
+        for row_off in (0, 1):
+            origin_r = target_row - row_off
+            origin_c = target_col - col_off
+            score = 0
+            for dc in range(2):
+                for dr in range(2):
+                    if dc == col_off and dr == row_off:
+                        continue
+                    nr = origin_r + dr
+                    nc = origin_c + dc
+                    if nr < 0 or nr >= rows or nc < 0 or nc >= cols:
+                        continue
+                    tile_dir = tiles_dir / f"tile_{nr}_{nc}"
+                    if (tile_dir / "generation.png").exists():
+                        is_cardinal = dc == col_off or dr == row_off
+                        score += 2 if is_cardinal else 1
+            if score > best_score:
+                best_score = score
+                best = (col_off, row_off)
+
+    return best
+
+
 def _build_template(
     target_row: int,
     target_col: int,
     tiles_dir: Path,
     rows: int,
     cols: int,
-    tile_w: int,
-    tile_h: int,
-) -> Image.Image:
-    """Build a 3×3 non-overlapping template with the target at center.
+) -> tuple[Image.Image, int, int]:
+    """Build a 2×2 template at 1024×1024 with 512×512 cells.
 
-    Matches the e2e pipeline's infill_template format:
-      - 3×3 grid of tiles placed side-by-side (no overlap)
-      - Target tile's render at center with red border
-      - 8 surrounding tiles as context (pixel art if generated, else black)
-      - Template size = 3 * tile_size (e.g. 3072×3072 for 1024 tiles)
+    Returns (template, col_off, row_off) where col_off/row_off indicate
+    the target's position in the 2×2 grid.
     """
-    comp_w = tile_w * 3
-    comp_h = tile_h * 3
-    template = Image.new("RGBA", (comp_w, comp_h), (0, 0, 0, 255))
+    col_off, row_off = _best_corner(target_row, target_col, tiles_dir, rows, cols)
+    origin_r = target_row - row_off
+    origin_c = target_col - col_off
 
-    # Place target render at center
-    target_dir = tiles_dir / f"tile_{target_row}_{target_col}"
-    target_render = _load_image(target_dir / "render.png")
-    cx, cy = tile_w, tile_h  # center position
-    if target_render:
-        template.paste(target_render, (cx, cy))
+    template = Image.new("RGBA", (TEMPLATE_SIZE, TEMPLATE_SIZE), (0, 0, 0, 255))
 
-    # Place 8 neighbors around the target
-    for dr in range(-1, 2):
-        for dc in range(-1, 2):
-            if dr == 0 and dc == 0:
-                continue
-            nr = target_row + dr
-            nc = target_col + dc
-            if nr < 0 or nr >= rows or nc < 0 or nc >= cols:
-                continue
-            tile_dir = tiles_dir / f"tile_{nr}_{nc}"
-            # Only use generated pixel art for context (not renders)
-            img = _load_image(tile_dir / "generation.png")
-            if img is None:
-                continue
-            px = (dc + 1) * tile_w
-            py = (dr + 1) * tile_h
-            template.paste(img, (px, py), img)
+    for dc in range(2):
+        for dr in range(2):
+            nr = origin_r + dr
+            nc = origin_c + dc
+            px = dc * CELL_SIZE
+            py = dr * CELL_SIZE
 
-    # Red border around the center tile
-    draw = ImageDraw.Draw(template)
-    for i in range(BORDER_WIDTH):
-        draw.rectangle(
-            [cx + i, cy + i, cx + tile_w - 1 - i, cy + tile_h - 1 - i],
-            outline=BORDER_COLOR,
-        )
+            if dc == col_off and dr == row_off:
+                # Target cell: paste downscaled render
+                target_dir = tiles_dir / f"tile_{nr}_{nc}"
+                render = _load_image(target_dir / "render.png")
+                if render:
+                    resized = render.resize((CELL_SIZE, CELL_SIZE), Image.LANCZOS)
+                    template.paste(resized, (px, py))
 
-    return template
+                # Red border
+                draw = ImageDraw.Draw(template)
+                for i in range(BORDER_WIDTH):
+                    draw.rectangle(
+                        [px + i, py + i, px + CELL_SIZE - 1 - i, py + CELL_SIZE - 1 - i],
+                        outline=BORDER_COLOR,
+                    )
+            else:
+                # Neighbor cell: use generated pixel art if available
+                if nr < 0 or nr >= rows or nc < 0 or nc >= cols:
+                    continue
+                tile_dir = tiles_dir / f"tile_{nr}_{nc}"
+                img = _load_image(tile_dir / "generation.png")
+                if img is None:
+                    continue
+                resized = img.resize((CELL_SIZE, CELL_SIZE), Image.LANCZOS)
+                template.paste(resized, (px, py))
+
+    return template, col_off, row_off
 
 
 def batch_generate(
@@ -132,15 +170,7 @@ def batch_generate(
     rows = max_row + 1
     cols = max_col + 1
 
-    # Get tile dimensions from first render
-    first_dir = Path(manifest[0]["dir"])
-    first_img = Image.open(first_dir / "render.png")
-    tile_w, tile_h = first_img.size
-    first_img.close()
-
-    template_size = tile_w * 3
-    target_pct = 100 / 9
-    print(f"3×3 template: {template_size}×{template_size}, target tile: {tile_w}×{tile_h} ({target_pct:.0f}%)")
+    print(f"2×2 template: {TEMPLATE_SIZE}×{TEMPLATE_SIZE}, cell: {CELL_SIZE}×{CELL_SIZE} (25%)")
 
     order = _spiral_order(rows, cols)
     total = len(order)
@@ -161,9 +191,9 @@ def batch_generate(
             print(f"  No render.png in {tile_dir}, skipping")
             continue
 
-        # Build 3×3 template with target at center + 8 neighbors
-        template = _build_template(r, c, tiles_dir, rows, cols, tile_w, tile_h)
-        print(f"  Template: {template.size[0]}×{template.size[1]}")
+        # Build 2×2 template with target at best corner
+        template, col_off, row_off = _build_template(r, c, tiles_dir, rows, cols)
+        print(f"  Template: {template.size[0]}×{template.size[1]}, target at ({col_off},{row_off})")
 
         # Save template for debugging
         template.save(tile_dir / "template.png")
@@ -182,11 +212,14 @@ def batch_generate(
         elapsed = time.time() - start
         print(f"  Generation took {elapsed:.1f}s, result: {result.size[0]}×{result.size[1]}")
 
-        # API returns 1024×1024 (model resolution). Upscale to template
-        # dimensions and crop center tile.
-        if result.size != template.size:
-            result = result.resize(template.size, Image.LANCZOS)
-        generation = result.crop((tile_w, tile_h, tile_w * 2, tile_h * 2))
+        # Crop target's 512×512 cell and upscale to 1024×1024
+        assert result.size == (TEMPLATE_SIZE, TEMPLATE_SIZE), (
+            f"Expected {TEMPLATE_SIZE}×{TEMPLATE_SIZE} result, got {result.size}"
+        )
+        px = col_off * CELL_SIZE
+        py = row_off * CELL_SIZE
+        crop = result.crop((px, py, px + CELL_SIZE, py + CELL_SIZE))
+        generation = crop.resize((1024, 1024), Image.LANCZOS)
         generation.save(gen_path)
         print(f"  Saved {gen_path}")
 

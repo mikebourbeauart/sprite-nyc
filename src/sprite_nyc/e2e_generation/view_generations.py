@@ -916,6 +916,7 @@ async function openDebugModal(x, y) {
     html += `<tr><td>Lat / Lng</td><td>${debug.lat}, ${debug.lng}</td></tr>`;
     html += `<tr><td>Generated</td><td>${debug.is_generated ? 'Yes' : 'No'}</td></tr>`;
     html += `<tr><td>Has Render</td><td>${debug.has_render ? 'Yes' : 'No'}</td></tr>`;
+    html += `<tr><td>Prompt</td><td style="font-size:11px;word-break:break-all">${debug.prompt || '—'}</td></tr>`;
     html += `<tr><td>Notes</td><td>${debug.notes || '—'}</td></tr>`;
     html += '</table></div>';
 
@@ -1368,6 +1369,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 self._respond(200, "application/json",
                               json.dumps({"count": len(results)}).encode())
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 self._respond(500, "application/json",
                               json.dumps({"error": str(e)}).encode())
         else:
@@ -1382,7 +1385,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
             db_path = get_db_path(self.generation_dir)
             conn = sqlite3.connect(str(db_path))
             conn.execute(
-                "UPDATE quadrants SET generation = NULL, is_generated = 0 WHERE x = ? AND y = ?",
+                "UPDATE quadrants SET generation = NULL, template = NULL, prompt = NULL, is_generated = 0 WHERE x = ? AND y = ?",
                 (x, y),
             )
             conn.commit()
@@ -1395,12 +1398,21 @@ class ViewerHandler(BaseHTTPRequestHandler):
     def _handle_debug(self, x: int, y: int):
         db_path = get_db_path(self.generation_dir)
         conn = sqlite3.connect(str(db_path))
-        cursor = conn.execute(
-            "SELECT id, lat, lng, x, y, is_generated, notes, "
-            "render IS NOT NULL, generation IS NOT NULL "
-            "FROM quadrants WHERE x = ? AND y = ?",
-            (x, y),
-        )
+        # Try to read prompt column; fall back if it doesn't exist yet
+        try:
+            cursor = conn.execute(
+                "SELECT id, lat, lng, x, y, is_generated, notes, "
+                "render IS NOT NULL, generation IS NOT NULL, prompt "
+                "FROM quadrants WHERE x = ? AND y = ?",
+                (x, y),
+            )
+        except sqlite3.OperationalError:
+            cursor = conn.execute(
+                "SELECT id, lat, lng, x, y, is_generated, notes, "
+                "render IS NOT NULL, generation IS NOT NULL "
+                "FROM quadrants WHERE x = ? AND y = ?",
+                (x, y),
+            )
         row = cursor.fetchone()
         if not row:
             conn.close()
@@ -1413,6 +1425,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
             "x": row[3], "y": row[4], "is_generated": bool(row[5]),
             "notes": row[6], "has_render": bool(row[7]),
             "has_generation": bool(row[8]),
+            "prompt": row[9] if len(row) > 9 else None,
         }
 
         # Neighbor states
@@ -1446,13 +1459,23 @@ class ViewerHandler(BaseHTTPRequestHandler):
             from sprite_nyc.e2e_generation.generate_omni import (
                 load_grid_from_db,
                 load_render_from_db,
+                load_template_from_db,
             )
             from sprite_nyc.e2e_generation.infill_template import (
-                QuadrantPosition,
                 create_template_image,
             )
 
             db_path = get_db_path(self.generation_dir)
+
+            # Serve the stored template if this tile was already generated
+            stored = load_template_from_db(db_path, x, y)
+            if stored is not None:
+                buf = io.BytesIO()
+                stored.save(buf, format="PNG")
+                self._respond(200, "image/png", buf.getvalue())
+                return
+
+            # Otherwise compute a live preview
             grid = load_grid_from_db(db_path)
             q = grid.get((x, y))
             if not q:
@@ -1469,7 +1492,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 if render:
                     render_lookup[key] = render
 
-            template = create_template_image(selected, grid, render_lookup)
+            template, _layout = create_template_image(selected, grid, render_lookup)
             buf = io.BytesIO()
             template.save(buf, format="PNG")
             self._respond(200, "image/png", buf.getvalue())
@@ -1511,6 +1534,10 @@ def main(generation_dir: str, port: int, api_key: str) -> None:
 
     ViewerHandler.generation_dir = gd
     ViewerHandler.api_key = api_key
+
+    # Ensure DB has template/prompt columns
+    from sprite_nyc.e2e_generation.generate_omni import _ensure_extra_columns
+    _ensure_extra_columns(gd / "quadrants.db")
 
     server = ThreadedHTTPServer(("0.0.0.0", port), ViewerHandler)
     print(f"Viewer running at http://localhost:{port}")

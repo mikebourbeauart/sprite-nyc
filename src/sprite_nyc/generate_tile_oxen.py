@@ -30,7 +30,8 @@ NUM_INFERENCE_STEPS = 28
 PROMPT = (
     "Fill in the outlined section with the missing pixels "
     "corresponding to the <sprite nyc pixel art> style. "
-    "The red border indicates the region to generate."
+    "The red border indicates the region to generate. "
+    "Variant: quadrant."
 )
 
 

@@ -9,7 +9,7 @@ creating infill template images and extracting generated quadrants.
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from PIL import Image, ImageDraw
 
@@ -244,6 +244,129 @@ def validate_generation_config(
 BORDER_COLOR = (255, 0, 0, 255)
 BORDER_WIDTH = 1
 TILE_SIZE = 1024  # default tile size in pixels
+CELL_SIZE = 512   # each cell in the 2×2 template
+
+
+def _best_corner_for_single(
+    q: QuadrantPosition,
+    grid: dict[tuple[int, int], QuadrantPosition],
+) -> tuple[int, int]:
+    """Pick the best corner (col, row) in a 2×2 grid for a 1×1 selection.
+
+    Scores each corner by counting generated neighbors that would be
+    visible in that 2×2 layout.  Cardinal neighbors get weight 2,
+    diagonal weight 1.
+
+    Returns (col_offset, row_offset) where each is 0 or 1.
+    """
+    best_corner = (0, 0)
+    best_score = -1
+
+    for col_off in (0, 1):
+        for row_off in (0, 1):
+            # The 2×2 grid origin in world coords if target is at (col_off, row_off)
+            origin_x = q.x - col_off
+            origin_y = q.y - row_off
+            score = 0
+            for dc in range(2):
+                for dr in range(2):
+                    if dc == col_off and dr == row_off:
+                        continue  # skip the target cell
+                    wx = origin_x + dc
+                    wy = origin_y + dr
+                    nb = grid.get((wx, wy))
+                    if nb and nb.state == QuadrantState.GENERATED:
+                        # Cardinal if shares row or col with target
+                        if dc == col_off or dr == row_off:
+                            score += 2
+                        else:
+                            score += 1
+            if score > best_score:
+                best_score = score
+                best_corner = (col_off, row_off)
+
+    return best_corner
+
+
+def _compute_2x2_layout(
+    selected: list[QuadrantPosition],
+    grid: dict[tuple[int, int], QuadrantPosition],
+) -> dict[tuple[int, int], tuple[int, int]]:
+    """Compute grid_coord → (col, row) mapping for the 2×2 template.
+
+    Returns a dict mapping world (x, y) to template cell (col, row),
+    where col and row are each 0 or 1.
+    """
+    xs = [q.x for q in selected]
+    ys = [q.y for q in selected]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    w = max_x - min_x + 1
+    h = max_y - min_y + 1
+
+    layout: dict[tuple[int, int], tuple[int, int]] = {}
+
+    if w == 1 and h == 1:
+        q = selected[0]
+        col_off, row_off = _best_corner_for_single(q, grid)
+        origin_x = q.x - col_off
+        origin_y = q.y - row_off
+        for dc in range(2):
+            for dr in range(2):
+                layout[(origin_x + dc, origin_y + dr)] = (dc, dr)
+
+    elif w == 1 and h == 2:
+        # Tall 1×2: selected fills one column, pick best column position
+        # Try placing selected in col 0 vs col 1
+        best_col = 0
+        best_score = -1
+        for col in (0, 1):
+            other_col = 1 - col
+            origin_x = min_x - col
+            score = 0
+            for dy in range(2):
+                wx = origin_x + other_col
+                wy = min_y + dy
+                nb = grid.get((wx, wy))
+                if nb and nb.state == QuadrantState.GENERATED:
+                    score += 2
+            if score > best_score:
+                best_score = score
+                best_col = col
+        origin_x = min_x - best_col
+        for dc in range(2):
+            for dr in range(2):
+                layout[(origin_x + dc, min_y + dr)] = (dc, dr)
+
+    elif w == 2 and h == 1:
+        # Wide 2×1: selected fills one row, pick best row position
+        best_row = 0
+        best_score = -1
+        for row in (0, 1):
+            other_row = 1 - row
+            origin_y = min_y - row
+            score = 0
+            for dx in range(2):
+                wx = min_x + dx
+                wy = origin_y + other_row
+                nb = grid.get((wx, wy))
+                if nb and nb.state == QuadrantState.GENERATED:
+                    score += 2
+            if score > best_score:
+                best_score = score
+                best_row = row
+        origin_y = min_y - best_row
+        for dc in range(2):
+            for dr in range(2):
+                layout[(min_x + dc, origin_y + dr)] = (dc, dr)
+
+    elif w == 2 and h == 2:
+        # All 4 selected fill the grid directly
+        for dc in range(2):
+            for dr in range(2):
+                layout[(min_x + dc, min_y + dr)] = (dc, dr)
+
+    return layout
 
 
 def create_template_image(
@@ -251,97 +374,74 @@ def create_template_image(
     grid: dict[tuple[int, int], QuadrantPosition],
     render_lookup: dict[tuple[int, int], Image.Image],
     tile_size: int = TILE_SIZE,
-) -> Image.Image:
+) -> tuple[Image.Image, dict[tuple[int, int], tuple[int, int]]]:
     """
-    Create the infill template image for a set of selected quadrants.
+    Create a 2×2 infill template at 1024×1024 with 512×512 cells.
 
     The template shows:
-      - Generated neighbors as pixel art (context)
-      - Selected quadrants as renders with red borders (to fill)
-      - Empty quadrants left black/transparent
+      - Selected quadrants as renders (downscaled to 512×512) with red borders
+      - Generated neighbors as pixel art context (downscaled to 512×512)
+      - Empty cells left black
 
-    The output image is sized to encompass all selected quadrants plus
-    one ring of neighbor context, at tile_size resolution per quadrant.
+    Returns (template_image, layout) where layout maps grid coords to
+    (col, row) positions in the 2×2 grid.
     """
     if not selected:
         raise ValueError("No quadrants selected")
 
-    # Find bounding box of selected + 1 ring of neighbors
-    all_keys = set()
-    for q in selected:
-        all_keys.add(q.key)
-        for nb_key in q.neighbor_keys().values():
-            all_keys.add(nb_key)
-
-    min_x = min(k[0] for k in all_keys)
-    max_x = max(k[0] for k in all_keys)
-    min_y = min(k[1] for k in all_keys)
-    max_y = max(k[1] for k in all_keys)
-
-    cols = max_x - min_x + 1
-    rows = max_y - min_y + 1
-
-    # Create the composite image
-    img_w = cols * tile_size
-    img_h = rows * tile_size
-    template = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 255))
-    draw = ImageDraw.Draw(template)
-
+    layout = _compute_2x2_layout(selected, grid)
     selected_keys = {q.key for q in selected}
 
-    for key in all_keys:
-        q = grid.get(key)
-        px = (key[0] - min_x) * tile_size
-        py = (key[1] - min_y) * tile_size
+    template = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0, 0, 0, 255))
+    draw = ImageDraw.Draw(template)
 
-        if key in selected_keys:
-            # Show the render for selected quadrants
-            render = render_lookup.get(key)
+    for world_key, (col, row) in layout.items():
+        px = col * CELL_SIZE
+        py = row * CELL_SIZE
+
+        if world_key in selected_keys:
+            # Paste downscaled render
+            render = render_lookup.get(world_key)
             if render:
-                resized = render.resize((tile_size, tile_size), Image.LANCZOS)
+                resized = render.resize((CELL_SIZE, CELL_SIZE), Image.LANCZOS)
                 template.paste(resized, (px, py))
 
-            # Red border
+            # Red border around this cell
             for i in range(BORDER_WIDTH):
                 draw.rectangle(
-                    [px + i, py + i, px + tile_size - 1 - i, py + tile_size - 1 - i],
+                    [px + i, py + i, px + CELL_SIZE - 1 - i, py + CELL_SIZE - 1 - i],
                     outline=BORDER_COLOR,
                 )
 
-        elif q and q.state == QuadrantState.GENERATED and q.image:
-            # Show the generated pixel art for context
-            resized = q.image.resize((tile_size, tile_size), Image.LANCZOS)
-            template.paste(resized, (px, py))
+        else:
+            # Neighbor cell — show generated pixel art if available
+            q = grid.get(world_key)
+            if q and q.state == QuadrantState.GENERATED and q.image:
+                resized = q.image.resize((CELL_SIZE, CELL_SIZE), Image.LANCZOS)
+                template.paste(resized, (px, py))
 
-    return template
+    return template, layout
 
 
 def extract_generated_quadrants(
     result_image: Image.Image,
     selected: list[QuadrantPosition],
-    grid: dict[tuple[int, int], QuadrantPosition],
-    tile_size: int = TILE_SIZE,
+    layout: dict[tuple[int, int], tuple[int, int]],
 ) -> dict[tuple[int, int], Image.Image]:
     """
     Extract individual quadrant images from a generation result.
 
-    The result image should match the template layout. This function
-    crops out each selected quadrant's region.
+    Crops each selected quadrant's 512×512 cell from the 1024×1024 result
+    and upscales it to 1024×1024 (the standard tile size).
     """
-    all_keys = set()
-    for q in selected:
-        all_keys.add(q.key)
-        for nb_key in q.neighbor_keys().values():
-            all_keys.add(nb_key)
-
-    min_x = min(k[0] for k in all_keys)
-    min_y = min(k[1] for k in all_keys)
-
     results = {}
     for q in selected:
-        px = (q.x - min_x) * tile_size
-        py = (q.y - min_y) * tile_size
-        crop = result_image.crop((px, py, px + tile_size, py + tile_size))
-        results[q.key] = crop
+        col, row = layout[q.key]
+        px = col * CELL_SIZE
+        py = row * CELL_SIZE
+        crop = result_image.crop((px, py, px + CELL_SIZE, py + CELL_SIZE))
+        # Upscale from 512×512 to 1024×1024
+        upscaled = crop.resize((TILE_SIZE, TILE_SIZE), Image.LANCZOS)
+        results[q.key] = upscaled
 
     return results

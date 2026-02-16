@@ -24,7 +24,8 @@ Transform the static gigapixel pixel-art map of NYC into a living, interactive s
 - Click buildings to see info (name, type, address)
 - Adjustable simulation speed / population density
 - Sound design (ambient city noise, honks, crosswalk chirps)
-- Subway entrances that spawn/absorb pedestrian clusters
+- **Real-time public transit** — underground cutaway layer showing live subway trains from MTA GTFS-RT, passengers waiting on platforms, and MTA buses on the surface (see 08_public_transit.md)
+- Subway entrances that spawn/absorb pedestrian clusters, connecting surface ↔ underground
 - Seasonal/weather overlays (snow, rain, autumn leaves)
 
 ## Architectural Overview
