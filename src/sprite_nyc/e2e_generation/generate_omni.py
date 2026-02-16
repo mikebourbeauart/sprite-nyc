@@ -259,8 +259,8 @@ def run_generation_for_quadrants(
     template, layout = create_template_image(selected, grid, render_lookup, tile_size)
 
     # Save template for debugging
-    template_path = generation_dir / "last_template.png"
-    template.save(template_path)
+    template_path = generation_dir.resolve() / "last_template.png"
+    template.save(str(template_path))
     print(f"Saved template to {template_path}")
 
     if dry_run:

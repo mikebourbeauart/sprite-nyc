@@ -14,125 +14,237 @@ Sprites (cars, pedestrians) are rendered on a layer above the static pixel-art t
        road behind                   road behind
 ```
 
-## Approach: Isometric Depth Map
+## Approach: Height Map from Orthographic 3D Render
 
-Generate a depth texture offline from OSM building data. At runtime, a custom PixiJS shader on each sprite samples the depth texture — if the sprite's isometric depth is further from the camera than the building surface at that pixel, the fragment is discarded.
+Rather than estimating building heights from OSM tags, render the actual Google 3D tile geometry from a top-down orthographic camera to produce a height map. This captures real building heights, roof shapes, and foliage canopy — no estimation needed.
 
-### How Isometric Depth Works
+The height map is then used at runtime to determine occlusion volumes: for each screen pixel, if there's a structure of height H at that ground position, sprites at ground level behind it (in isometric depth terms) should be hidden.
 
-In our projection (azimuth -15°, elevation -45°), every point on screen maps to an isometric depth value:
+### Why 3D Render Instead of OSM Tags
 
+- Google 3D tiles have measured geometry — real roof heights, not guesses
+- Captures structures not in OSM (sheds, construction, awnings)
+- Captures foliage canopy shape and height
+- No dependency on OSM tagging quality (many NYC buildings lack `height` or `building:levels`)
+
+## Offline Height Map Generation
+
+### Step 1: Orthographic Top-Down Render
+
+Use the existing Three.js + Google 3D Tiles renderer (`web/`) with a modified camera:
+
+```typescript
+// Modified camera for height map capture
+const camera = new THREE.OrthographicCamera(
+  -extentX / 2, extentX / 2,   // left, right (meters)
+  extentY / 2, -extentY / 2,   // top, bottom (meters)
+  0.1, 500                      // near, far (meters above ground)
+)
+camera.position.set(centerX, centerY, 400)  // straight down
+camera.lookAt(centerX, centerY, 0)
+camera.up.set(0, 1, 0)  // north = up
 ```
-depth = worldY * cos(azimuthRad) + worldX * sin(azimuthRad)
+
+Render to a depth buffer. The depth value at each pixel = distance from camera = inverse height of the surface:
+
+```typescript
+// Depth render target
+const depthTarget = new THREE.WebGLRenderTarget(width, height, {
+  type: THREE.FloatType,
+  format: THREE.RedFormat,
+})
+
+// Custom depth material that writes world-space height
+const depthMaterial = new THREE.ShaderMaterial({
+  vertexShader: `
+    varying float vHeight;
+    void main() {
+      vHeight = (modelMatrix * vec4(position, 1.0)).z;  // world Z = height
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vHeight;
+    void main() {
+      gl_FragColor = vec4(vHeight / 300.0, 0.0, 0.0, 1.0);  // normalize to 0-1
+    }
+  `,
+})
 ```
 
-Higher depth = further from camera = rendered behind.
+This produces a texture where each pixel stores the height (in meters) of whatever geometry is at that ground position. Ground = ~0, building roofs = 10-300m, tree canopy = 5-20m.
 
-A building at ground position (bx, by) with height H projects upward on screen. Its front face (the part visible to the camera) has a ground-level depth, but it visually occupies screen pixels that correspond to deeper ground positions behind it. The depth map encodes: "at this screen pixel, the closest surface has depth D." Sprites with depth > D are occluded.
+### Step 2: Capture via Playwright
 
-## Offline Depth Map Generation
-
-### Input
-
-- OSM building footprints from `scene.json` (already projected to screen space)
-- Building heights: `building:levels` tag × 3m/level, or `height` tag, or default estimate (12m for residential, 40m for commercial)
-
-### Isometric Extrusion
-
-Each building footprint is extruded upward in isometric screen space to produce its visible silhouette:
+Same approach as the existing `batch_export.py` — Playwright drives the Three.js renderer:
 
 ```python
-def extrude_building(footprint_screen, height_meters, meters_per_px_y, elevation):
-    """
-    Given a building's screen-space footprint polygon and its height,
-    compute the screen-space silhouette (footprint + upward extrusion).
-    """
-    # In our isometric projection, vertical height maps to a screen-space
-    # Y offset (upward on screen = negative Y)
-    height_px = height_meters * abs(sin(elevation)) / meters_per_px_y
+# tools/capture_height_map.py
+# Reuses the existing web renderer with a top-down camera override
 
-    # The silhouette is the union of:
-    # 1. The original footprint
-    # 2. The footprint shifted up by height_px
-    # 3. The connecting edges (the visible front faces)
-    roof_polygon = [(x, y - height_px) for (x, y) in footprint_screen]
+async def capture_height_map(page, center_lat, center_lng, extent_meters, output_path):
+    """
+    Navigate to the web renderer with top-down orthographic camera,
+    capture the depth buffer as a height map image.
+    """
+    await page.goto(f'http://localhost:3000/heightmap?'
+                    f'lat={center_lat}&lng={center_lng}'
+                    f'&extent={extent_meters}')
+    await page.wait_for_selector('#render-complete')
 
-    # Compute the convex hull or union of footprint + roof
-    silhouette = polygon_union(footprint_screen, roof_polygon)
+    # Read back the height data as a float texture
+    height_data = await page.evaluate('window.getHeightMapData()')
+    save_height_map(height_data, output_path)
+```
+
+The render can be tiled for large areas (same grid as the existing tile plan), or done as one large capture if the area fits.
+
+### Step 3: Classify Occluders
+
+The raw height map contains everything — buildings, ground, foliage, water. Different structure types need different occlusion shapes:
+
+```
+Height map pixel → classify → occlusion volume
+
+Buildings:    rectangular column (roof height → ground)
+Foliage:      cone/tapered column (canopy height → trunk at ground)
+Ground:       no occlusion (height ≈ 0)
+```
+
+#### Building Footprint Masking
+
+Cross-reference the height map with OSM building footprints from `scene.json`:
+
+```python
+def classify_height_map(height_map, building_footprints, ground_threshold=2.0):
+    """
+    For each pixel in the height map:
+    - If inside a building footprint → 'building' (rectangular occlusion)
+    - If height > threshold but NOT in a building → 'foliage' (conical occlusion)
+    - Otherwise → 'ground' (no occlusion)
+    """
+    classification = np.zeros_like(height_map, dtype=np.uint8)
+    building_mask = rasterize_polygons(building_footprints, height_map.shape)
+
+    classification[building_mask & (height_map > ground_threshold)] = BUILDING
+    classification[~building_mask & (height_map > ground_threshold)] = FOLIAGE
+    # Everything else stays GROUND (0)
+
+    return classification
+```
+
+### Step 4: Generate Occlusion Map
+
+From the classified height map, produce the final occlusion texture used at runtime. This encodes, for each screen pixel in the isometric view, the isometric depth of the frontmost occluding surface.
+
+#### Building Occlusion (Rectangular Column)
+
+A building at ground position (gx, gy) with roof height H creates a rectangular occlusion volume. In the isometric projection, this volume projects to a screen-space region that extends upward from the footprint. Any sprite at ground level whose isometric depth is greater than the building's front-face depth, and whose screen position falls within this projection, is occluded.
+
+```
+  Top-down height map:        Isometric occlusion projection:
+
+  ┌───────┐ H=40m                    ╱─────╲  ← roof edge
+  │building│                        ╱ front ╲
+  │footprnt│                       ╱  face   ╲
+  └───────┘                       │  occluded │
+                                  │   zone    │
+                                  └───────────┘ ← ground footprint
+```
+
+```python
+def building_occlusion_column(footprint_screen, height_meters, elevation_rad, meters_per_px_y):
+    """
+    Extrude building footprint upward in isometric screen space.
+    Returns the screen-space polygon of the full visible silhouette.
+    The occlusion depth within this polygon = building's front-face depth.
+    """
+    height_px = height_meters * abs(math.sin(elevation_rad)) / meters_per_px_y
+
+    # Roof polygon = footprint shifted up on screen
+    roof = [(x, y - height_px) for (x, y) in footprint_screen]
+
+    # Silhouette = union of footprint + roof + connecting edges
+    silhouette = polygon_union(footprint_screen, roof)
     return silhouette
 ```
 
-### Rendering the Depth Map
+#### Foliage Occlusion (Conical / Tapered)
 
-For each building, fill its extruded silhouette in the depth map with the building's front-face depth value:
+Trees are wide at canopy height and taper to a narrow trunk at ground level. The occlusion volume is a cone: at the canopy height it has the full canopy radius, at ground level it shrinks to roughly the trunk radius (~0.3m).
+
+```
+  Top-down height map:        Isometric occlusion projection:
+
+    ●●●●● H=12m                     ╱╲  ← canopy (wide)
+    ●tree●                          ╱  ╲
+    ●●●●●                          │    │  ← tapers
+                                    │  │   ← trunk (narrow)
+                                    │  │
+```
 
 ```python
-def render_depth_map(buildings, world_width, world_height, scale=0.25):
+def foliage_occlusion_cone(center_screen, canopy_radius_px, height_meters,
+                            elevation_rad, meters_per_px_y):
     """
-    Render a depth texture at 1/4 world resolution.
-    Each pixel stores a normalized depth value (0.0 = closest, 1.0 = farthest).
+    Tapered occlusion: full radius at canopy height, shrinks to trunk_radius at ground.
+    Returns a set of (polygon, depth) pairs for different height slices.
     """
-    dm_width = int(world_width * scale)
-    dm_height = int(world_height * scale)
+    height_px = height_meters * abs(math.sin(elevation_rad)) / meters_per_px_y
+    trunk_radius_px = canopy_radius_px * 0.1  # trunk ≈ 10% of canopy width
 
-    # Initialize with max depth (ground plane depth at each pixel)
-    depth_map = np.zeros((dm_height, dm_width), dtype=np.float32)
+    # Discretize into N height slices
+    slices = []
+    N_SLICES = 4
+    for i in range(N_SLICES):
+        t = i / (N_SLICES - 1)  # 0 = ground, 1 = canopy top
+        radius = lerp(trunk_radius_px, canopy_radius_px, t)
+        y_offset = height_px * t
+        # Circle at this height slice, shifted up on screen
+        cx, cy = center_screen
+        circle = approximate_circle(cx, cy - y_offset, radius)
+        slices.append(circle)
 
-    for y in range(dm_height):
-        for x in range(dm_width):
-            # Ground depth at this screen position
-            wx, wy = x / scale, y / scale
-            depth_map[y, x] = isometric_depth(wx, wy)
-
-    # For each building, set pixels within its silhouette to
-    # the building's FRONT face depth (which is closer to camera)
-    for building in buildings:
-        silhouette = extrude_building(
-            building.screen_polygon,
-            building.height_meters,
-            meters_per_px_y,
-            elevation_rad
-        )
-        front_depth = building_front_depth(building)
-
-        # All pixels inside the silhouette get the front depth
-        # (which is LESS than the ground behind it → sprites behind are occluded)
-        scaled_silhouette = [(x * scale, y * scale) for (x, y) in silhouette]
-        fill_polygon(depth_map, scaled_silhouette, front_depth)
-
-    return depth_map
+    # Union of all slices = tapered silhouette
+    return polygon_union_all(slices)
 ```
 
-The key insight: inside a building's silhouette, the depth value is set to the building's **front face depth** (closer to camera). Any sprite whose depth is greater than this (i.e., behind the building) gets discarded at those pixels.
+**TBD**: The exact cone shape and trunk ratio may need tuning once we see the actual 3D tile foliage. Google's 3D tiles sometimes model trees as flat photo textures, sometimes as geometry — the canopy shape in the height map will vary.
 
-### Tiled Output
+### Output: Tiled Occlusion Depth Map
 
-The full world depth map could be enormous. Tile it to match the DZI tile structure:
+The final output is a tiled depth map matching the DZI structure:
 
 ```
-interactive/assets/depth/
-  level_N/            ← matches a DZI zoom level
-    0_0.png           ← 256x256 grayscale tiles
+interactive/assets/occlusion/
+  level_N/            ← matches a DZI zoom level (e.g., 1:4 scale)
+    0_0.png           ← 256x256 tiles, 16-bit grayscale
     0_1.png
     ...
 ```
 
-Use a single DZI zoom level (e.g., the one closest to 1:4 world scale). Each tile is a 256x256 grayscale PNG where pixel intensity encodes normalized depth (0 = near, 255 = far).
+Each pixel stores: **the isometric depth of the closest occluding surface at this screen position.** Ground-level pixels store their own ground depth (no occlusion). Building/foliage pixels store the front-face depth of the occluder.
 
-Estimated total size: ~5-15MB for a large map area at 1/4 resolution.
+Two-channel encoding for the occlusion map:
+- **R channel**: normalized isometric depth of the occluder (0 = near, 255 = far)
+- **G channel**: occluder type (0 = ground/none, 128 = building, 255 = foliage)
+
+The type channel allows the runtime shader to apply different occlusion behavior per type (hard cutoff for buildings, soft fade for foliage).
 
 ### Tool
 
-```
-tools/
-  generate_depth_map.py    ← reads scene.json buildings, outputs depth tiles
-```
-
 ```bash
-uv run python tools/generate_depth_map.py \
+# 1. Capture height map from 3D tiles (requires web renderer running on port 3000)
+uv run python tools/capture_height_map.py \
+  --view view.json \
+  --output interactive/assets/heightmap/
+
+# 2. Classify + generate occlusion depth map
+uv run python tools/generate_occlusion_map.py \
+  --heightmap interactive/assets/heightmap/ \
   --scene interactive/assets/scene.json \
   --view view.json \
-  --output interactive/assets/depth/ \
+  --output interactive/assets/occlusion/ \
   --scale 0.25
 ```
 
@@ -140,66 +252,66 @@ uv run python tools/generate_depth_map.py \
 
 ### Depth-Tested Sprite Filter
 
-PixiJS v8 supports custom filters (WebGL2/WebGPU). The depth occlusion filter samples the depth texture and discards fragments behind buildings.
+PixiJS v8 supports custom filters (WebGL2/WebGPU). The occlusion filter samples the depth texture and discards fragments behind buildings, with optional soft fade for foliage.
 
 ```typescript
 import { Filter, GlProgram, Texture } from 'pixi.js'
 
-const DEPTH_OCCLUSION_VERT = `
-  in vec2 aPosition;
-  in vec2 aUV;
-  out vec2 vUV;
-  out vec2 vWorldPos;
-
-  uniform mat3 uTransformMatrix;
-  uniform mat3 uProjectionMatrix;
-
-  void main() {
-    gl_Position = vec4((uProjectionMatrix * uTransformMatrix * vec3(aPosition, 1.0)).xy, 0.0, 1.0);
-    vUV = aUV;
-    vWorldPos = (uTransformMatrix * vec3(aPosition, 1.0)).xy;
-  }
-`
-
-const DEPTH_OCCLUSION_FRAG = `
+const OCCLUSION_FRAG = `
   in vec2 vUV;
   in vec2 vWorldPos;
   out vec4 finalColor;
 
   uniform sampler2D uTexture;
-  uniform sampler2D uDepthMap;
+  uniform sampler2D uOcclusionMap;
   uniform float uSpriteDepth;       // isometric depth of this sprite
-  uniform vec2 uDepthMapOffset;     // viewport offset into depth map
-  uniform vec2 uDepthMapScale;      // world-to-depth-map coordinate scale
+  uniform vec2 uOcclusionOffset;    // viewport offset into occlusion map
+  uniform vec2 uOcclusionScale;     // world-to-occlusion coordinate scale
   uniform vec2 uDepthRange;         // [minDepth, maxDepth] for normalization
 
   void main() {
     vec4 color = texture(uTexture, vUV);
     if (color.a < 0.01) discard;
 
-    // Sample depth map at this fragment's world position
-    vec2 depthUV = (vWorldPos - uDepthMapOffset) * uDepthMapScale;
-    float sceneDepth = texture(uDepthMap, depthUV).r;
+    // Sample occlusion map at this fragment's world position
+    vec2 occUV = (vWorldPos - uOcclusionOffset) * uOcclusionScale;
+    vec4 occSample = texture(uOcclusionMap, occUV);
 
-    // Denormalize: depth map stores 0-1, map back to world depth range
-    float sceneDepthWorld = mix(uDepthRange.x, uDepthRange.y, sceneDepth);
+    float occDepth = mix(uDepthRange.x, uDepthRange.y, occSample.r);
+    float occType = occSample.g;  // 0 = none, ~0.5 = building, ~1.0 = foliage
 
-    // If sprite is behind the scene surface at this pixel, discard
-    if (uSpriteDepth > sceneDepthWorld) {
-      discard;
+    // No occluder at this pixel
+    if (occType < 0.1) {
+      finalColor = color;
+      return;
     }
 
-    finalColor = color;
+    // Sprite is in front of occluder — render normally
+    if (uSpriteDepth <= occDepth) {
+      finalColor = color;
+      return;
+    }
+
+    // Sprite is behind occluder
+    if (occType > 0.7) {
+      // Foliage: soft fade (partial visibility through leaves)
+      float behindAmount = (uSpriteDepth - occDepth) / 20.0;  // fade over 20 depth units
+      float foliageAlpha = clamp(1.0 - behindAmount * 0.7, 0.0, 1.0);
+      finalColor = vec4(color.rgb, color.a * foliageAlpha);
+    } else {
+      // Building: hard occlusion
+      discard;
+    }
   }
 `
 
-class DepthOcclusionFilter extends Filter {
-  constructor(depthTexture: Texture) {
+class OcclusionFilter extends Filter {
+  constructor(occlusionTexture: Texture) {
     const glProgram = GlProgram.from({
-      vertex: DEPTH_OCCLUSION_VERT,
-      fragment: DEPTH_OCCLUSION_FRAG,
+      vertex: OCCLUSION_VERT,  // same as before — passes vWorldPos
+      fragment: OCCLUSION_FRAG,
     })
-    super({ glProgram, resources: { uDepthMap: depthTexture.source } })
+    super({ glProgram, resources: { uOcclusionMap: occlusionTexture.source } })
   }
 
   set spriteDepth(value: number) {
@@ -208,59 +320,41 @@ class DepthOcclusionFilter extends Filter {
 }
 ```
 
+### Foliage Behavior
+
+Buildings use hard `discard` — sprites behind them are fully hidden. Foliage uses a **soft fade**: sprites behind trees are partially visible (reduced alpha), simulating seeing through leaves. The fade amount depends on how far behind the tree the sprite is — a sprite just behind gets mostly visible, one well behind fades more.
+
+This is configurable — the `0.7` threshold and `20.0` fade distance in the shader can be tuned once we see real results.
+
 ### Applying the Filter
 
-Two strategies for applying the depth test:
+**Recommended: Hybrid — only filter sprites near occluders**
 
-**Option A: Per-sprite filter (simple, fewer sprites)**
 ```typescript
-function syncSpriteOcclusion(sprite: PIXI.Sprite, entity: Entity) {
-  const depth = computeSortDepth(entity.x, entity.y)
-  const filter = sprite.filters?.[0] as DepthOcclusionFilter
-  filter.spriteDepth = depth
-}
-```
-
-Each sprite gets its own filter instance with its depth value. Fine for hundreds of sprites, but each filter is a separate draw call — breaks batching.
-
-**Option B: Container-level filter with depth attribute (batched)**
-```typescript
-// Apply a single filter to the entire SpriteLayer container
-// Pass per-sprite depth via a vertex attribute
-spriteLayer.filters = [depthOcclusionFilter]
-
-// Each sprite encodes its depth in its tint alpha or a custom attribute
-// The shader reads depth per-fragment from the vertex interpolation
-```
-
-More complex setup but maintains PixiJS batching. **Recommended for thousands of sprites.**
-
-**Option C: Hybrid — only filter sprites near buildings**
-```typescript
-function needsOcclusion(entity: Entity, buildings: Building[]): boolean {
-  // Quick spatial hash check: is this entity near any building?
-  return nearbyBuildings(entity.x, entity.y).length > 0
+function needsOcclusion(entityX: number, entityY: number): boolean {
+  // Quick check: sample the occlusion map type channel at entity position
+  // If type > 0 in any nearby pixel, this entity needs the filter
+  return occlusionLoader.hasOccluderNear(entityX, entityY, radius: 64)
 }
 
-// Only apply filter to sprites that are actually near buildings
+// Only apply filter to sprites near buildings/foliage
 // Most sprites on open roads skip the depth test entirely
 ```
 
-Best real-world performance — most sprites never go behind buildings and don't need the filter at all. **Recommended approach.**
+For thousands of sprites, most will be on open roads and skip the filter. Only sprites near buildings or under tree canopy pay the shader cost.
 
-### Depth Map Tile Loading
+For batching at scale, move to a container-level filter with per-sprite depth passed as a vertex attribute (see 04_simulation.md performance notes).
 
-Load depth map tiles the same way as DZI tiles — only fetch tiles within the current viewport:
+### Occlusion Map Tile Loading
+
+Same pattern as DZI tile loading — viewport-culled, LRU-cached:
 
 ```typescript
-class DepthMapLoader {
+class OcclusionMapLoader {
   private cache: LRUCache<string, PIXI.Texture> = new LRUCache(50)
 
   updateForViewport(viewport: Viewport) {
-    // Determine which depth tiles overlap the visible area
-    const level = this.depthLevel  // fixed zoom level (e.g., 1/4 scale)
-    const visibleTiles = this.getTilesInView(viewport.bounds, level)
-
+    const visibleTiles = this.getTilesInView(viewport.bounds)
     for (const { col, row } of visibleTiles) {
       if (!this.cache.has(`${col}_${row}`)) {
         this.loadTile(col, row)
@@ -268,12 +362,9 @@ class DepthMapLoader {
     }
   }
 
-  getDepthAt(worldX: number, worldY: number): number {
-    // Sample the depth value at a world position
-    // Used by the hybrid approach to check if occlusion filter is needed
-    const tile = this.getTileForPosition(worldX, worldY)
-    if (!tile) return Infinity  // no depth data → no occlusion
-    return sampleTexture(tile, worldX, worldY)
+  hasOccluderNear(worldX: number, worldY: number, radius: number): boolean {
+    // Sample type channel in a small area around the position
+    // Returns true if any building or foliage occluder is nearby
   }
 }
 ```
@@ -282,44 +373,43 @@ class DepthMapLoader {
 
 ### Partial Occlusion
 
-A sprite partially behind a building should be partially visible — the shader handles this per-fragment. The front half of a car peeking out from behind a building is rendered, the back half is discarded.
+The shader works per-fragment. A car partially behind a building has its visible half rendered and its hidden half discarded. This is the main advantage of the depth map approach over coarser methods.
 
-### Building Height Estimation
+### Bridges and Overpasses
 
-Not all OSM buildings have height data. Fallback heuristic:
+The height map will capture bridge geometry at its elevation. Sprites on roads beneath bridges should be occluded. This works naturally — the bridge surface has a height, creating an occlusion column. However, sprites ON the bridge should not be occluded by the bridge itself. **TBD**: may need a ground-elevation channel to distinguish "sprite on bridge" from "sprite under bridge." Revisit if the map area includes bridges.
 
-| `building` tag | Estimated height |
-|---|---|
-| `residential` | 12m (4 floors) |
-| `commercial` | 25m (8 floors) |
-| `office` | 40m (13 floors) |
-| `skyscraper` | 150m |
-| `house` | 8m (2-3 floors) |
-| `church`, `cathedral` | 20m |
-| (no tag / default) | 10m |
+### Google 3D Tile LOD
 
-If `building:levels` is present, use `levels * 3.0m`. If `height` tag is present, use it directly.
+The Three.js renderer loads different LODs of Google 3D tiles based on zoom level. For the height map capture, force the highest available LOD to get accurate building geometry:
 
-### Sprite Anchor Point vs. Fragment Depth
+```typescript
+// In the height map capture mode
+tileset.maximumScreenSpaceError = 1  // force highest detail
+```
 
-The shader uses a single `uSpriteDepth` per sprite (based on the entity's ground position). This means a tall sprite (like a bus) uses the same depth for all its pixels. For small sprites (16x12 cars) this is imperceptible. For larger sprites, could pass depth as a vertex attribute that varies across the quad — but probably unnecessary at this scale.
+### Height Map Resolution
+
+At 1:4 scale, a building footprint that's 20m × 20m (≈30px × 30px on the map) becomes ~8×8 pixels in the height map. Sufficient for occlusion — we don't need sub-meter precision.
 
 ### Underground Layer
 
-The underground subway overlay (08_public_transit.md) renders on top of everything and is **not** affected by the depth map. It's a visual overlay, not a spatially-sorted layer.
+The underground subway overlay (08_public_transit.md) renders on top of everything as a visual overlay and is **not** affected by occlusion. It's an illustrative layer, not a spatially-sorted one.
 
 ## Integration
 
 | Document | Update |
 |---|---|
-| **02_renderer.md** | Add depth map loading to the render loop, note filter on SpriteLayer |
-| **03_data_sources.md** | Add building heights as extracted data |
-| **06_integration.md** | Add `tools/generate_depth_map.py` to project structure, `depth/` to assets |
-| **07_milestones.md** | Add depth occlusion as a Tier 2 milestone |
+| **02_renderer.md** | Add occlusion map loading to render loop, note filter on SpriteLayer |
+| **06_integration.md** | Add `tools/capture_height_map.py`, `tools/generate_occlusion_map.py` to project structure; add `occlusion/` and `heightmap/` to assets |
+| **07_milestones.md** | Add occlusion as a Tier 2 milestone |
 
 ## Implementation Order
 
-1. **Generate depth map offline** — `generate_depth_map.py` reads `scene.json` buildings, produces tiled grayscale PNGs
-2. **Basic shader** — per-sprite filter, verify occlusion works on a few test sprites near known buildings
-3. **Hybrid spatial check** — only apply filter to sprites near buildings (spatial hash lookup)
-4. **Batched approach** — if performance needs it, move to container-level filter with per-vertex depth
+1. **Height map capture** — add a `/heightmap` route to the web renderer with top-down orthographic camera + depth shader. Capture via Playwright.
+2. **Classification** — cross-reference height map with OSM building footprints to separate buildings from foliage.
+3. **Occlusion map generation** — extrude buildings (rectangular) and foliage (conical) into isometric depth values. Tile the output.
+4. **Basic shader** — per-sprite filter, verify occlusion on a few test sprites near known buildings.
+5. **Foliage tuning** — adjust cone shape, soft fade parameters based on real visual results.
+6. **Hybrid spatial check** — only apply filter to sprites near occluders.
+7. **Batched approach** — if performance needs it, move to container-level filter with per-vertex depth.
